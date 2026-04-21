@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bilibili 会员购监控</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Bilibili 会员购监控</h1>
+        <p id="configPath"></p>
+      </div>
+      <div class="status" id="statusPill">未运行</div>
+    </header>
+
+    <main class="layout">
+      <section class="workspace" aria-label="监控配置">
+        <div class="toolbar">
+          <div class="toolbar-group">
+            <button id="addEventBtn" class="secondary" type="button">＋ 活动</button>
+            <button id="saveBtn" class="primary" type="button">保存配置</button>
+          </div>
+          <div class="toolbar-group">
+            <label class="check">
+              <input id="headlessInput" type="checkbox">
+              <span>无头模式</span>
+            </label>
+            <button id="dryRunBtn" class="secondary" type="button">Dry run</button>
+            <button id="startBtn" class="primary" type="button">▶ 启动</button>
+            <button id="stopBtn" class="danger" type="button">■ 停止</button>
+          </div>
+        </div>
+
+        <div class="defaults">
+          <label>
+            <span>刷新间隔 秒</span>
+            <input id="intervalInput" type="number" min="10" step="1">
+          </label>
+          <label>
+            <span>随机抖动</span>
+            <input id="jitterInput" type="number" min="0" max="1" step="0.05">
+          </label>
+          <label>
+            <span>并发页面</span>
+            <input id="parallelInput" type="number" min="1" step="1">
+          </label>
+          <label>
+            <span>浏览器</span>
+            <select id="browserInput">
+              <option value="msedge">Microsoft Edge</option>
+              <option value="chrome">Google Chrome</option>
+              <option value="chromium">Playwright Chromium</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="notifications">
+          <label class="check">
+            <input id="openClawEnabledInput" type="checkbox">
+            <span>启用 OpenClaw 通知</span>
+          </label>
+          <label>
+            <span>OpenClaw Webhook URL</span>
+            <input id="openClawUrlInput" type="url" placeholder="http://127.0.0.1:18789/hooks/wake">
+          </label>
+          <label>
+            <span>Token 环境变量</span>
+            <input id="openClawTokenEnvInput" type="text" placeholder="OPENCLAW_HOOKS_TOKEN">
+          </label>
+        </div>
+
+        <div id="events"></div>
+      </section>
+
+      <aside class="side" aria-label="运行输出">
+        <div class="side-header">
+          <h2>运行输出</h2>
+          <button id="clearLogBtn" class="icon-button" type="button" title="清空输出">⌫</button>
+        </div>
+        <pre id="logOutput"></pre>
+      </aside>
+    </main>
+
+    <template id="eventTemplate">
+      <article class="event-panel">
+        <div class="event-head">
+          <label>
+            <span>活动名</span>
+            <input class="event-name" type="text">
+          </label>
+          <label class="url-field">
+            <span>页面 URL</span>
+            <input class="event-url" type="url">
+          </label>
+          <label>
+            <span>间隔 秒</span>
+            <input class="event-interval" type="number" min="10" step="1">
+          </label>
+          <button class="remove-event icon-button" type="button" title="删除活动">×</button>
+        </div>
+        <div class="target-list"></div>
+        <button class="add-target secondary compact" type="button">＋ 票档</button>
+      </article>
+    </template>
+
+    <template id="targetTemplate">
+      <div class="target-row">
+        <label>
+          <span>名称</span>
+          <input class="target-name" type="text">
+        </label>
+        <label class="keywords-field">
+          <span>关键字</span>
+          <textarea class="target-keywords" rows="3"></textarea>
+        </label>
+        <label>
+          <span>数量</span>
+          <input class="target-quantity" type="number" min="1" step="1">
+        </label>
+        <label>
+          <span>优先级</span>
+          <input class="target-priority" type="number" min="1" step="1">
+        </label>
+        <button class="remove-target icon-button" type="button" title="删除票档">×</button>
+      </div>
+    </template>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

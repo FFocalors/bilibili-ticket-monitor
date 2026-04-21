@@ -1,0 +1,31 @@
+{
+  "name": "bilibili-ticket-monitor",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "description": "Bilibili ticket monitor with desktop/OpenClaw notifications and manual checkout handoff.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Focalors/bilibili-ticket-monitor.git"
+  },
+  "scripts": {
+    "gui": "pnpm build && node dist/src/gui/server.js",
+    "monitor": "pnpm build && node dist/src/cli.js",
+    "monitor:dry-run": "pnpm build && node dist/src/cli.js --dry-run",
+    "test": "pnpm build && node dist/tests/run-tests.js",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "browsers:install": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.51.1",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

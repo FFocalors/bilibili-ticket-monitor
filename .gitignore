@@ -1,0 +1,10 @@
+node_modules/
+dist/
+logs/
+.browser-profile/
+.browser-profile-*/
+.env
+*.local
+config/events.yaml
+config/events.local.yaml
+config/*.local.yaml
