@@ -25,6 +25,7 @@ export interface MonitorDefaults {
   maxParallelPages: number;
   headless: boolean;
   browserChannel: string;
+  autoEnterOrderPage: boolean;
   userDataDir: string;
   logFile: string;
   screenshotDir: string;

@@ -27,6 +27,10 @@
               <input id="headlessInput" type="checkbox">
               <span>无头模式</span>
             </label>
+            <label class="check">
+              <input id="autoEnterInput" type="checkbox">
+              <span>自动进订单页</span>
+            </label>
             <button id="dryRunBtn" class="secondary" type="button">Dry run</button>
             <button id="startBtn" class="primary" type="button">▶ 启动</button>
             <button id="stopBtn" class="danger" type="button">■ 停止</button>
@@ -57,18 +61,16 @@
         </div>
 
         <div class="notifications">
-          <label class="check">
-            <input id="openClawEnabledInput" type="checkbox">
-            <span>启用 OpenClaw 通知</span>
+          <label>
+            <span>OpenClaw 健康检查</span>
+            <input id="openClawHealthInput" type="text" value="http://127.0.0.1:4174/health" readonly>
           </label>
           <label>
-            <span>OpenClaw Webhook URL</span>
-            <input id="openClawUrlInput" type="url" placeholder="http://127.0.0.1:18789/hooks/wake">
+            <span>OpenClaw 事件接口</span>
+            <input id="openClawEventsInput" type="text" value="http://127.0.0.1:4174/events?since=0" readonly>
           </label>
-          <label>
-            <span>Token 环境变量</span>
-            <input id="openClawTokenEnvInput" type="text" placeholder="OPENCLAW_HOOKS_TOKEN">
-          </label>
+          <button id="localNotificationTestBtn" class="primary" type="button">测试本地提醒</button>
+          <button id="openClawTestBtn" class="secondary" type="button">测试 OpenClaw</button>
         </div>
 
         <div id="events"></div>
@@ -82,6 +84,23 @@
         <pre id="logOutput"></pre>
       </aside>
     </main>
+
+    <div id="localAlertOverlay" class="local-alert" hidden role="alertdialog" aria-modal="true" aria-labelledby="localAlertTitle">
+      <div class="local-alert-content">
+        <div class="local-alert-header">
+          <div class="local-alert-icon" aria-hidden="true">!</div>
+          <div>
+            <div class="local-alert-eyebrow">高优先级提醒</div>
+            <div id="localAlertTitle" class="local-alert-title">本地提醒</div>
+          </div>
+        </div>
+        <div id="localAlertMessage" class="local-alert-message"></div>
+        <div class="local-alert-actions">
+          <button id="closeLocalAlertBtn" class="local-alert-button" type="button">确认并关闭</button>
+          <span class="local-alert-hint">可按 Esc 或空格关闭</span>
+        </div>
+      </div>
+    </div>
 
     <template id="eventTemplate">
       <article class="event-panel">

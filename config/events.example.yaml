@@ -4,6 +4,7 @@ defaults:
   maxParallelPages: 1
   headless: false
   browserChannel: msedge
+  autoEnterOrderPage: true
   userDataDir: .browser-profile
   logFile: logs/monitor.log
   screenshotDir: logs/screenshots

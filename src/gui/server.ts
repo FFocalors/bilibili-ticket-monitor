@@ -6,6 +6,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { parseConfig } from "../config.js";
+import { notifyUser } from "../notifier.js";
+import {
+  appendOpenClawBridgeEvent,
+  openClawOutboxPathFromLogFile,
+  readOpenClawBridgeEvents
+} from "../openclaw-bridge.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,6 +21,9 @@ const exampleConfigPath = path.resolve(projectRoot, "config/events.example.yaml"
 const publicDir = path.resolve(projectRoot, "src/gui/public");
 const cliPath = path.resolve(__dirname, "../cli.js");
 const port = Number(process.env.GUI_PORT ?? 4173);
+const host = process.env.GUI_HOST ?? "127.0.0.1";
+const bridgePort = Number(process.env.OPENCLAW_BRIDGE_PORT ?? 4174);
+const bridgeHost = process.env.OPENCLAW_BRIDGE_HOST ?? "0.0.0.0";
 
 interface ActiveProcess {
   mode: "monitor" | "dry-run";
@@ -68,6 +77,14 @@ const server = createServer(async (request, response) => {
       handleStopProcess(response);
       return;
     }
+    if (url.pathname === "/api/openclaw/test" && request.method === "POST") {
+      await handleTestOpenClaw(request, response);
+      return;
+    }
+    if (url.pathname === "/api/local-notification/test" && request.method === "POST") {
+      handleTestLocalNotification(response);
+      return;
+    }
     if (url.pathname === "/api/stream" && request.method === "GET") {
       handleStream(response);
       return;
@@ -80,10 +97,63 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(port, "127.0.0.1", () => {
-  const url = `http://127.0.0.1:${port}`;
+server.on("error", (error: NodeJS.ErrnoException) => {
+  if (error.code === "EADDRINUSE") {
+    appendLine(`GUI port ${host}:${port} is already in use; OpenClaw bridge will continue if available`);
+    console.warn(`GUI port ${host}:${port} is already in use; OpenClaw bridge will continue if available`);
+    return;
+  }
+  appendLine(`GUI server failed: ${error.message}`);
+  console.error(error);
+});
+
+server.listen(port, host, () => {
+  const url = `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
   appendLine(`GUI ready: ${url}`);
   console.log(`GUI ready: ${url}`);
+});
+
+const bridgeServer = createServer(async (request, response) => {
+  try {
+    if (!request.url) {
+      sendJson(response, 400, { error: "Missing URL" });
+      return;
+    }
+
+    const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
+    if ((url.pathname === "/health" || url.pathname === "/api/openclaw/health") && request.method === "GET") {
+      await handleOpenClawBridgeHealth(response);
+      return;
+    }
+    if ((url.pathname === "/events" || url.pathname === "/api/openclaw/events") && request.method === "GET") {
+      await handleOpenClawBridgeEvents(url, response);
+      return;
+    }
+    if (url.pathname === "/hooks/wake") {
+      sendJson(response, 410, {
+        error: "This Windows bridge is pull-only. OpenClaw should GET /events?since=0 instead of POST /hooks/wake.",
+        health: "/health",
+        events: "/events?since=0"
+      });
+      return;
+    }
+
+    sendJson(response, 404, { error: "Not found" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    sendJson(response, 500, { error: message });
+  }
+});
+
+bridgeServer.on("error", (error: NodeJS.ErrnoException) => {
+  appendLine(`OpenClaw bridge failed: ${error.message}`);
+  console.error(error);
+});
+
+bridgeServer.listen(bridgePort, bridgeHost, () => {
+  const displayHost = bridgeHost === "0.0.0.0" ? "127.0.0.1" : bridgeHost;
+  appendLine(`OpenClaw bridge ready: http://${displayHost}:${bridgePort}/events`);
+  console.log(`OpenClaw bridge ready: http://${displayHost}:${bridgePort}/events`);
 });
 
 async function handleGetConfig(response: ServerResponse): Promise<void> {
@@ -174,6 +244,82 @@ function handleStopProcess(response: ServerResponse): void {
   appendLine(`Stopping ${activeProcess.mode}...`);
   activeProcess.child.kill("SIGINT");
   sendJson(response, 200, getStatus());
+}
+
+async function handleTestOpenClaw(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const body = await readJson(request);
+  const enabledInConfig = Boolean(body?.openclaw?.enabled);
+  const outbox = await resolveOpenClawOutboxPath();
+
+  try {
+    await appendOpenClawBridgeEvent(outbox, {
+      title: "Bilibili 会员购监控测试",
+      message: "这是一条本地 OpenClaw 桥接测试事件。",
+      details: {
+        source: "gui-bridge-test",
+        time: new Date().toISOString(),
+        enabledInConfig
+      }
+    });
+    const result = await readOpenClawBridgeEvents(outbox, 0, 1_000);
+    appendLine(`OpenClaw bridge test event written: ${outbox}; latestId=${result.latestId}`);
+    sendJson(response, 200, {
+      ok: true,
+      enabledInConfig,
+      outbox,
+      latestId: result.latestId,
+      nextSince: result.nextSince
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendLine(`OpenClaw bridge test failed: ${message}`);
+    sendJson(response, 400, { error: message });
+  }
+}
+
+function handleTestLocalNotification(response: ServerResponse): void {
+  notifyUser({
+    title: "Bilibili 本地强提醒测试",
+    message: "这是本地强提醒测试。真正有票时会弹出同样的全屏闪烁提醒。"
+  });
+  appendLine("Local notification test triggered");
+  sendJson(response, 200, { ok: true });
+}
+
+async function handleOpenClawBridgeHealth(response: ServerResponse): Promise<void> {
+  const outbox = await resolveOpenClawOutboxPath();
+  sendJson(response, 200, {
+    ok: true,
+    service: "bilibili-ticket-monitor-openclaw-bridge",
+    time: new Date().toISOString(),
+    outbox
+  });
+}
+
+async function handleOpenClawBridgeEvents(url: URL, response: ServerResponse): Promise<void> {
+  const since = Number(url.searchParams.get("since") ?? 0);
+  const limit = Number(url.searchParams.get("limit") ?? 100);
+  const outbox = await resolveOpenClawOutboxPath();
+  const result = await readOpenClawBridgeEvents(
+    outbox,
+    Number.isFinite(since) && since > 0 ? Math.floor(since) : 0,
+    Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 200) : 100
+  );
+  sendJson(response, 200, {
+    ok: true,
+    ...result
+  });
+}
+
+async function resolveOpenClawOutboxPath(): Promise<string> {
+  const sourcePath = existsSync(configPath) ? configPath : exampleConfigPath;
+  try {
+    const raw = await readFile(sourcePath, "utf8");
+    const config = parseConfig(raw, projectRoot);
+    return openClawOutboxPathFromLogFile(config.defaults.logFile);
+  } catch {
+    return path.resolve(projectRoot, "logs/openclaw-events.jsonl");
+  }
 }
 
 function handleStream(response: ServerResponse): void {

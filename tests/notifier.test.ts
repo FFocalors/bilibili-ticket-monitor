@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { notifyOpenClaw } from "../src/notifier.js";
+import { appendOpenClawBridgeEvent, readOpenClawBridgeEvents } from "../src/openclaw-bridge.js";
 
 test("notifyOpenClaw posts webhook payload with bearer token", async () => {
   const received = await new Promise<{ auth: string | undefined; body: any }>((resolve, reject) => {
@@ -45,4 +49,29 @@ test("notifyOpenClaw posts webhook payload with bearer token", async () => {
   assert.equal(received.body.mode, "now");
   assert.match(received.body.text, /Bilibili ticket available/);
   assert.match(received.body.text, /example-event/);
+});
+
+test("OpenClaw bridge outbox supports since-based polling", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bilibili-openclaw-"));
+  const outbox = path.join(dir, "openclaw-events.jsonl");
+
+  await appendOpenClawBridgeEvent(outbox, {
+    title: "Bilibili ticket available",
+    message: "target entered order page",
+    details: { target: "example" }
+  });
+  await appendOpenClawBridgeEvent(outbox, {
+    title: "Bilibili monitor paused",
+    message: "captcha detected"
+  });
+
+  const firstRead = await readOpenClawBridgeEvents(outbox, 0);
+  assert.equal(firstRead.events.length, 2);
+  assert.equal(firstRead.nextSince, 2);
+  assert.equal(firstRead.events[0].id, 1);
+  assert.equal(firstRead.events[0].details?.target, "example");
+
+  const secondRead = await readOpenClawBridgeEvents(outbox, firstRead.nextSince);
+  assert.equal(secondRead.events.length, 0);
+  assert.equal(secondRead.latestId, 2);
 });

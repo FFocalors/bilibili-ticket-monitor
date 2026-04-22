@@ -59,6 +59,7 @@ export const FORBIDDEN_ORDER_ACTION_PATTERNS = [
   /提交订单/,
   /确认订单/,
   /确认提交/,
+  /订单信息/,
   /下一步支付/,
   /立即支付/,
   /去支付/,
@@ -79,6 +80,15 @@ export function detectAvailabilityFromText(
       state: "blocked",
       reason: "Order or payment action is visible; manual handoff required.",
       matchedText: forbiddenButton.text
+    };
+  }
+
+  const forbiddenText = firstMatchingPattern(text, FORBIDDEN_ORDER_ACTION_PATTERNS);
+  if (forbiddenText) {
+    return {
+      state: "blocked",
+      reason: "Order or payment action is visible; manual handoff required.",
+      matchedText: forbiddenText
     };
   }
 
@@ -109,12 +119,26 @@ export function detectAvailabilityFromText(
     };
   }
 
+  const targetOption = classifyTargetOption(text, target?.keywords ?? []);
+  if (targetOption) {
+    return targetOption;
+  }
+
   const availableButton = firstMatchingButton(buttons, AVAILABLE_BUTTON_PATTERNS, false);
   if (availableButton) {
     return {
       state: "available",
       reason: "Enabled purchase button detected.",
       matchedText: availableButton.text
+    };
+  }
+
+  const availableActionText = firstMatchingPattern(text, AVAILABLE_BUTTON_PATTERNS);
+  if (availableActionText) {
+    return {
+      state: "available",
+      reason: "Purchase entry text detected.",
+      matchedText: availableActionText
     };
   }
 
@@ -178,11 +202,72 @@ export function extractButtonsFromHtml(html: string): ButtonSnapshot[] {
 }
 
 function normalizeText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
+  return value
+    .normalize("NFKC")
+    .replace(/[￥]/g, "¥")
+    .replace(/\b(\d{4})[./-](\d{1,2})[./-](\d{1,2})\b/g, (_match, year: string, month: string, day: string) =>
+      `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`
+    )
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function firstMissingKeyword(text: string, keywords: string[]): string | undefined {
-  return keywords.find((keyword) => !text.includes(keyword));
+  const compactText = compactForKeywordMatch(text);
+  return keywords.find((keyword) => {
+    const normalizedKeyword = normalizeText(keyword);
+    return !text.includes(normalizedKeyword) && !compactText.includes(compactForKeywordMatch(normalizedKeyword));
+  });
+}
+
+function compactForKeywordMatch(value: string): string {
+  return normalizeText(value).replace(/\s+/g, "");
+}
+
+function classifyTargetOption(text: string, keywords: string[]): DetectionResult | undefined {
+  const optionKeywords = keywords
+    .map(normalizeText)
+    .filter((keyword) => keyword.length > 0 && !isDateKeyword(keyword));
+  if (optionKeywords.length < 2) {
+    return undefined;
+  }
+
+  const fragments = extractPriceFragments(text);
+  const matches = fragments.filter((fragment) => containsAllKeywords(fragment, optionKeywords));
+  if (matches.length === 0) {
+    return undefined;
+  }
+
+  const available = matches.find((fragment) => !firstMatchingPattern(fragment, SOLD_OUT_PATTERNS));
+  if (available) {
+    return {
+      state: "available",
+      reason: "Target ticket option appears available.",
+      matchedText: available
+    };
+  }
+
+  return {
+    state: "sold_out",
+    reason: "Target ticket option is sold out.",
+    matchedText: matches[0]
+  };
+}
+
+function extractPriceFragments(text: string): string[] {
+  return text
+    .split(/(?=¥\s*\d+)/)
+    .map((fragment) => fragment.slice(0, 140).trim())
+    .filter(Boolean);
+}
+
+function containsAllKeywords(text: string, keywords: string[]): boolean {
+  const compactText = compactForKeywordMatch(text);
+  return keywords.every((keyword) => compactText.includes(compactForKeywordMatch(keyword)));
+}
+
+function isDateKeyword(value: string): boolean {
+  return /\b\d{4}[./-]\d{1,2}[./-]\d{1,2}\b/.test(value);
 }
 
 function firstMatchingPattern(text: string, patterns: RegExp[]): string | undefined {

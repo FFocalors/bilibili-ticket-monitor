@@ -17,6 +17,7 @@ const DEFAULTS: MonitorDefaults = {
   maxParallelPages: 1,
   headless: false,
   browserChannel: "msedge",
+  autoEnterOrderPage: true,
   userDataDir: ".browser-profile",
   logFile: "logs/monitor.log",
   screenshotDir: "logs/screenshots"
@@ -103,6 +104,7 @@ function normalizeDefaults(raw: Partial<MonitorDefaults>, baseDir: string): Moni
     maxParallelPages: positiveInteger(raw.maxParallelPages ?? DEFAULTS.maxParallelPages, "defaults.maxParallelPages"),
     headless: Boolean(raw.headless ?? DEFAULTS.headless),
     browserChannel: normalizeBrowserChannel(raw.browserChannel ?? DEFAULTS.browserChannel),
+    autoEnterOrderPage: Boolean(raw.autoEnterOrderPage ?? DEFAULTS.autoEnterOrderPage),
     userDataDir: resolveConfigPath(raw.userDataDir ?? DEFAULTS.userDataDir, baseDir),
     logFile: resolveConfigPath(raw.logFile ?? DEFAULTS.logFile, baseDir),
     screenshotDir: resolveConfigPath(raw.screenshotDir ?? DEFAULTS.screenshotDir, baseDir)

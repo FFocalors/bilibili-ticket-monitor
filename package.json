@@ -6,10 +6,15 @@
   "description": "Bilibili ticket monitor with desktop/OpenClaw notifications and manual checkout handoff.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Focalors/bilibili-ticket-monitor.git"
+    "url": "git+https://github.com/FFocalors/bilibili-ticket-monitor.git"
+  },
+  "homepage": "https://github.com/FFocalors/bilibili-ticket-monitor#readme",
+  "bugs": {
+    "url": "https://github.com/FFocalors/bilibili-ticket-monitor/issues"
   },
   "scripts": {
     "gui": "pnpm build && node dist/src/gui/server.js",
+    "bridge:check": "powershell -ExecutionPolicy Bypass -File scripts/check-openclaw-bridge.ps1",
     "monitor": "pnpm build && node dist/src/cli.js",
     "monitor:dry-run": "pnpm build && node dist/src/cli.js --dry-run",
     "test": "pnpm build && node dist/tests/run-tests.js",

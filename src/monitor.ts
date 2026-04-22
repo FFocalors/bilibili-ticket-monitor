@@ -3,7 +3,8 @@ import path from "node:path";
 import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
 import { AVAILABLE_BUTTON_PATTERNS, FORBIDDEN_ORDER_ACTION_PATTERNS, detectAvailabilityFromText } from "./detector.js";
 import { createLogger, type Logger } from "./logger.js";
-import { notifyOpenClaw, notifyUser, type NotificationPayload } from "./notifier.js";
+import { notifyUser, type NotificationPayload } from "./notifier.js";
+import { appendOpenClawBridgeEvent, openClawOutboxPathFromLogFile } from "./openclaw-bridge.js";
 import type { DetectionResult, MonitorConfig, NormalizedTarget } from "./types.js";
 import { flattenTargets } from "./config.js";
 
@@ -23,6 +24,7 @@ interface RunMonitorOptions {
 export async function runMonitor(config: MonitorConfig, options: RunMonitorOptions = {}): Promise<void> {
   const logger = createLogger(config.defaults.logFile);
   const targets = flattenTargets(config);
+  const effectiveHeadless = options.headless ?? config.defaults.headless;
   if (targets.length === 0) {
     throw new Error("No targets found in config.");
   }
@@ -31,12 +33,13 @@ export async function runMonitor(config: MonitorConfig, options: RunMonitorOptio
   await logger.info("Starting monitor", {
     targets: targets.length,
     browserChannel: config.defaults.browserChannel,
+    autoEnterOrderPage: config.defaults.autoEnterOrderPage,
     userDataDir: config.defaults.userDataDir
   });
 
   const context = await chromium.launchPersistentContext(config.defaults.userDataDir, {
     channel: config.defaults.browserChannel === "chromium" ? undefined : config.defaults.browserChannel,
-    headless: options.headless ?? config.defaults.headless,
+    headless: effectiveHeadless,
     viewport: { width: 1366, height: 900 }
   });
 
@@ -64,6 +67,11 @@ export async function runMonitor(config: MonitorConfig, options: RunMonitorOptio
         break;
       }
     }
+
+    if (!options.once && !effectiveHeadless && runtimes.some((runtime) => runtime.halted)) {
+      await logger.warn("Manual handoff active; browser will stay open until you stop the monitor");
+      await waitForever();
+    }
   } finally {
     process.off("SIGINT", shutdown);
     process.off("SIGTERM", shutdown);
@@ -82,8 +90,10 @@ async function inspectTarget(
 
   try {
     const page = await getTargetPage(context, runtime);
-    await page.goto(target.url, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => undefined);
+    if (!isManualHandoffUrl(page.url())) {
+      await page.goto(target.url, { waitUntil: "domcontentloaded", timeout: 45000 });
+      await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => undefined);
+    }
 
     const result = await detectPageState(page, target);
     await logger.info("Checked target", {
@@ -95,24 +105,39 @@ async function inspectTarget(
     });
 
     if (result.state === "available") {
-      runtime.halted = true;
       await page.bringToFront();
-      const hovered = await hoverManualHandoffButton(page, result, "available");
-      const screenshot = await saveScreenshot(page, config.defaults.screenshotDir, target, "available");
-      await sendNotifications(config, logger, {
-        title: "Bilibili ticket available",
-        message: `${target.eventName} / ${target.name}: ${result.reason}`,
-        details: {
+      const handoff = await prepareAvailableHandoff(page, target, result, config.defaults.autoEnterOrderPage);
+
+      if (handoff.enteredOrderPage || !config.defaults.autoEnterOrderPage) {
+        runtime.halted = true;
+        const screenshot = await saveScreenshot(page, config.defaults.screenshotDir, target, handoff.enteredOrderPage ? "order-entry" : "available");
+        await sendNotifications(config, logger, {
+          title: "Bilibili ticket available",
+          message: `${target.eventName} / ${target.name}: ${handoff.message}`,
+          details: {
+            target: target.id,
+            url: target.url,
+            matchedText: result.matchedText,
+            clickedEntry: handoff.clickedEntry,
+            enteredOrderPage: handoff.enteredOrderPage,
+            hovered: handoff.hovered,
+            screenshot
+          }
+        });
+        await logger.warn("Target available; manual handoff required", {
           target: target.id,
-          url: target.url,
-          matchedText: result.matchedText,
+          ...handoff,
           screenshot
-        }
-      });
-      await logger.warn("Target available; manual handoff required", {
+        });
+        return;
+      }
+
+      runtime.failures = 0;
+      runtime.nextAt = Date.now() + 5_000;
+      await logger.warn("Purchase entry click did not reach order page; retry scheduled", {
         target: target.id,
-        hovered,
-        screenshot
+        retryInMs: runtime.nextAt - Date.now(),
+        ...handoff
       });
       return;
     }
@@ -160,26 +185,109 @@ async function inspectTarget(
   }
 }
 
+function isManualHandoffUrl(url: string): boolean {
+  return /\/confirmOrder\.html/i.test(url);
+}
+
 async function sendNotifications(config: MonitorConfig, logger: Logger, payload: NotificationPayload): Promise<void> {
   notifyUser(payload);
 
   try {
-    const sent = await notifyOpenClaw(config.notifications.openclaw, payload);
-    if (sent) {
-      await logger.info("OpenClaw notification sent", {
-        url: config.notifications.openclaw.url
-      });
-    }
+    await appendOpenClawBridgeEvent(openClawOutboxPathFromLogFile(config.defaults.logFile), payload);
+    await logger.info("OpenClaw bridge event written", {
+      outbox: openClawOutboxPathFromLogFile(config.defaults.logFile)
+    });
   } catch (error) {
-    await logger.warn("OpenClaw notification failed", {
+    await logger.warn("OpenClaw bridge event write failed", {
       error: error instanceof Error ? error.message : String(error)
     });
   }
+
+  await logger.info("OpenClaw bridge mode active; WSL should poll /events");
+}
+
+async function prepareAvailableHandoff(
+  page: Page,
+  target: NormalizedTarget,
+  result: DetectionResult,
+  autoEnterOrderPage: boolean
+): Promise<{
+  clickedEntry: boolean;
+  enteredOrderPage: boolean;
+  hovered: boolean;
+  message: string;
+  postClickState?: string;
+  postClickReason?: string;
+}> {
+  if (!autoEnterOrderPage) {
+    return {
+      clickedEntry: false,
+      enteredOrderPage: false,
+      hovered: await hoverManualHandoffButton(page, result, "available"),
+      message: result.reason
+    };
+  }
+
+  const entryButton = await findActionButton(page, result.matchedText, AVAILABLE_BUTTON_PATTERNS);
+  if (!entryButton) {
+    return {
+      clickedEntry: false,
+      enteredOrderPage: false,
+      hovered: await hoverManualHandoffButton(page, result, "available"),
+      message: `${result.reason}; entry button not found.`
+    };
+  }
+
+  try {
+    await entryButton.scrollIntoViewIfNeeded({ timeout: 3000 });
+    await clickActionAtCenter(page, entryButton);
+    await page.waitForURL(/\/confirmOrder\.html/i, { timeout: 8000 }).catch(() => undefined);
+    await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => undefined);
+    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => undefined);
+    await page.waitForTimeout(800);
+
+    const postClickResult = await detectPageState(page, target);
+    const enteredOrderPage = isManualHandoffUrl(page.url()) || isOrderHandoffResult(postClickResult);
+    const hoveredOrder = enteredOrderPage ? await hoverManualHandoffButton(page, postClickResult, "order") : false;
+    return {
+      clickedEntry: true,
+      enteredOrderPage,
+      hovered: hoveredOrder,
+      message: enteredOrderPage && hoveredOrder
+        ? "Entered order information page; payment handoff button is ready."
+        : enteredOrderPage
+          ? "Entered order information page; please continue manually."
+          : "Clicked purchase entry, but order information page was not reached.",
+      postClickState: postClickResult.state,
+      postClickReason: postClickResult.reason
+    };
+  } catch (error) {
+    return {
+      clickedEntry: false,
+      enteredOrderPage: false,
+      hovered: await hoverManualHandoffButton(page, result, "available"),
+      message: `Failed to click ticket entry button: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+}
+
+async function clickActionAtCenter(page: Page, locator: Locator): Promise<void> {
+  const box = await locator.boundingBox({ timeout: 3000 }).catch(() => null);
+  if (box && box.width > 0 && box.height > 0) {
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.click(x, y);
+    return;
+  }
+
+  await locator.hover({ timeout: 3000 });
+  await locator.click({ timeout: 5000 });
 }
 
 async function detectPageState(page: Page, target: NormalizedTarget): Promise<DetectionResult> {
   const visibleText = await page.locator("body").innerText({ timeout: 10000 }).catch(() => "");
-  const buttons = await page.locator("button, a, [role='button']").evaluateAll((elements) =>
+  const buttons = await page.locator(actionElementSelector()).evaluateAll((elements) =>
     elements
       .map((element) => {
         const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
@@ -220,22 +328,70 @@ async function findActionButton(
   matchedText: string | undefined,
   patterns: RegExp[]
 ): Promise<Locator | undefined> {
-  const selector = "button, a, [role='button']";
+  const selector = actionElementSelector();
   if (matchedText) {
-    const byMatchedText = page.locator(selector).filter({ hasText: matchedText }).first();
-    if (await isVisibleActionButton(byMatchedText)) {
+    const byVisibleText = await findBestTextLocator(page, matchedText);
+    if (byVisibleText) {
+      return byVisibleText;
+    }
+
+    const byMatchedText = await findBestActionLocator(page, selector, matchedText);
+    if (byMatchedText) {
       return byMatchedText;
     }
   }
 
   for (const pattern of patterns) {
-    const byPattern = page.locator(selector).filter({ hasText: pattern }).first();
-    if (await isVisibleActionButton(byPattern)) {
+    const byVisibleText = await findBestTextLocator(page, pattern);
+    if (byVisibleText) {
+      return byVisibleText;
+    }
+
+    const byPattern = await findBestActionLocator(page, selector, pattern);
+    if (byPattern) {
       return byPattern;
     }
   }
 
   return undefined;
+}
+
+async function findBestActionLocator(page: Page, selector: string, text: string | RegExp): Promise<Locator | undefined> {
+  const candidates = page.locator(selector).filter({ hasText: text });
+  return findSmallestVisibleLocator(candidates);
+}
+
+async function findBestTextLocator(page: Page, text: string | RegExp): Promise<Locator | undefined> {
+  if (typeof text === "string") {
+    const exact = await findSmallestVisibleLocator(page.getByText(text, { exact: true }));
+    if (exact) {
+      return exact;
+    }
+  }
+
+  return findSmallestVisibleLocator(page.getByText(text));
+}
+
+async function findSmallestVisibleLocator(candidates: Locator): Promise<Locator | undefined> {
+  const count = await candidates.count().catch(() => 0);
+  let best: Locator | undefined;
+  let bestArea = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < Math.min(count, 30); index += 1) {
+    const candidate = candidates.nth(index);
+    const box = await candidate.boundingBox({ timeout: 1000 }).catch(() => null);
+    if (!box || box.width <= 0 || box.height <= 0 || !(await isVisibleActionButton(candidate))) {
+      continue;
+    }
+
+    const area = box.width * box.height;
+    if (area < bestArea) {
+      best = candidate;
+      bestArea = area;
+    }
+  }
+
+  return best;
 }
 
 async function isVisibleActionButton(locator: Locator): Promise<boolean> {
@@ -245,15 +401,46 @@ async function isVisibleActionButton(locator: Locator): Promise<boolean> {
   }
 
   return locator.evaluate((element) => {
+    const tagName = element.tagName.toLowerCase();
     const style = window.getComputedStyle(element);
     const rect = element.getBoundingClientRect();
     const disabled =
       element.hasAttribute("disabled") ||
       element.getAttribute("aria-disabled") === "true" ||
       element.className.toString().toLowerCase().includes("disabled");
+    const isPageContainer = tagName === "html" || tagName === "body";
 
-    return !disabled && style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+    return (
+      !disabled &&
+      !isPageContainer &&
+      style.visibility !== "hidden" &&
+      style.display !== "none" &&
+      rect.width > 8 &&
+      rect.height > 8 &&
+      rect.width < 1000 &&
+      rect.height < 300
+    );
   }).catch(() => false);
+}
+
+function actionElementSelector(): string {
+  return [
+    "button",
+    "a",
+    "[role='button']",
+    "[onclick]",
+    "[class*='btn' i]",
+    "[class*='button' i]",
+    "[class*='buy' i]",
+    "[class*='pay' i]"
+  ].join(", ");
+}
+
+function isOrderHandoffResult(result: DetectionResult): boolean {
+  return (
+    result.state === "blocked" &&
+    Boolean(result.matchedText && FORBIDDEN_ORDER_ACTION_PATTERNS.some((pattern) => pattern.test(result.matchedText ?? "")))
+  );
 }
 
 async function getTargetPage(context: BrowserContext, runtime: TargetRuntime): Promise<Page> {
@@ -322,4 +509,8 @@ function safeFilePart(value: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForever(): Promise<never> {
+  return new Promise(() => undefined);
 }

@@ -116,14 +116,14 @@ if ($IntervalSeconds -lt 10) {
 
 $openClawEnabledValue = $false
 if ([string]::IsNullOrWhiteSpace($OpenClawEnabled)) {
-  $openClawEnabledValue = Read-BoolDefault -Prompt "Enable OpenClaw notification" -Default $false
+  $openClawEnabledValue = Read-BoolDefault -Prompt "Enable legacy OpenClaw webhook notification" -Default $false
 } else {
   $openClawEnabledValue = Convert-BoolText -Value $OpenClawEnabled
 }
 
 if ($openClawEnabledValue) {
-  $OpenClawUrl = Read-Default -Prompt "OpenClaw webhook URL" -Default $OpenClawUrl
-  $OpenClawTokenEnv = Read-Default -Prompt "OpenClaw token env name" -Default $OpenClawTokenEnv
+  $OpenClawUrl = Read-Default -Prompt "Legacy OpenClaw webhook URL" -Default $OpenClawUrl
+  $OpenClawTokenEnv = Read-Default -Prompt "Legacy OpenClaw token env name" -Default $OpenClawTokenEnv
 }
 
 $keywordLines = ($Keywords | ForEach-Object { "          - " + (Quote-Yaml $_) }) -join [Environment]::NewLine
@@ -136,6 +136,7 @@ defaults:
   maxParallelPages: 1
   headless: false
   browserChannel: $BrowserChannel
+  autoEnterOrderPage: true
   userDataDir: .browser-profile
   logFile: logs/monitor.log
   screenshotDir: logs/screenshots
@@ -165,4 +166,6 @@ Write-Host "Config generated: $configPath" -ForegroundColor Green
 if ($openClawEnabledValue) {
   Write-Host "Set this Windows environment variable before launch:" -ForegroundColor Yellow
   Write-Host ('$env:' + $OpenClawTokenEnv + '="token configured in OpenClaw"') -ForegroundColor Yellow
+} else {
+  Write-Host "OpenClaw pull bridge will be available from the GUI at port 4174." -ForegroundColor Yellow
 }

@@ -1,6 +1,13 @@
 const state = {
   config: null,
-  status: { running: false, recentLines: [] }
+  status: { running: false, recentLines: [] },
+  alert: {
+    active: false,
+    audioContext: null,
+    timers: [],
+    originalTitle: document.title,
+    lastLogAlertAt: 0
+  }
 };
 
 const elements = {
@@ -12,9 +19,9 @@ const elements = {
   parallelInput: document.querySelector("#parallelInput"),
   browserInput: document.querySelector("#browserInput"),
   headlessInput: document.querySelector("#headlessInput"),
-  openClawEnabledInput: document.querySelector("#openClawEnabledInput"),
-  openClawUrlInput: document.querySelector("#openClawUrlInput"),
-  openClawTokenEnvInput: document.querySelector("#openClawTokenEnvInput"),
+  autoEnterInput: document.querySelector("#autoEnterInput"),
+  localNotificationTestBtn: document.querySelector("#localNotificationTestBtn"),
+  openClawTestBtn: document.querySelector("#openClawTestBtn"),
   addEventBtn: document.querySelector("#addEventBtn"),
   saveBtn: document.querySelector("#saveBtn"),
   dryRunBtn: document.querySelector("#dryRunBtn"),
@@ -22,6 +29,10 @@ const elements = {
   stopBtn: document.querySelector("#stopBtn"),
   clearLogBtn: document.querySelector("#clearLogBtn"),
   logOutput: document.querySelector("#logOutput"),
+  localAlertOverlay: document.querySelector("#localAlertOverlay"),
+  localAlertTitle: document.querySelector("#localAlertTitle"),
+  localAlertMessage: document.querySelector("#localAlertMessage"),
+  closeLocalAlertBtn: document.querySelector("#closeLocalAlertBtn"),
   eventTemplate: document.querySelector("#eventTemplate"),
   targetTemplate: document.querySelector("#targetTemplate")
 };
@@ -35,8 +46,16 @@ elements.saveBtn.addEventListener("click", () => runAction(saveConfig));
 elements.dryRunBtn.addEventListener("click", () => runAction(() => runProcess("dry-run")));
 elements.startBtn.addEventListener("click", () => runAction(() => runProcess("start")));
 elements.stopBtn.addEventListener("click", () => runAction(stopProcess));
+elements.localNotificationTestBtn.addEventListener("click", () => runAction(testLocalNotification));
+elements.openClawTestBtn.addEventListener("click", () => runAction(testOpenClaw));
+elements.closeLocalAlertBtn.addEventListener("click", stopLocalAlert);
 elements.clearLogBtn.addEventListener("click", () => {
   elements.logOutput.textContent = "";
+});
+window.addEventListener("keydown", (event) => {
+  if (state.alert.active && (event.key === "Escape" || event.key === " ")) {
+    stopLocalAlert();
+  }
 });
 
 async function loadConfig() {
@@ -63,9 +82,7 @@ function renderConfig() {
   elements.parallelInput.value = defaults.maxParallelPages ?? 1;
   elements.browserInput.value = defaults.browserChannel ?? "msedge";
   elements.headlessInput.checked = Boolean(defaults.headless);
-  elements.openClawEnabledInput.checked = Boolean(state.config.notifications.openclaw.enabled);
-  elements.openClawUrlInput.value = state.config.notifications.openclaw.url ?? "http://127.0.0.1:18789/hooks/wake";
-  elements.openClawTokenEnvInput.value = state.config.notifications.openclaw.tokenEnv ?? "OPENCLAW_HOOKS_TOKEN";
+  elements.autoEnterInput.checked = defaults.autoEnterOrderPage !== false;
   elements.events.replaceChildren();
   state.config.events.forEach((event) => renderEvent(event));
 }
@@ -144,6 +161,33 @@ async function stopProcess() {
   applyStatus(status);
 }
 
+async function testOpenClaw() {
+  elements.openClawTestBtn.disabled = true;
+  appendLog("正在写入 OpenClaw 桥接测试事件...");
+  try {
+    const result = await fetchJson("/api/openclaw/test", { method: "POST" });
+    appendLog(`OpenClaw 桥接测试事件已写入：${result.outbox}`);
+    appendLog(`OpenClaw 最新事件 ID：${result.latestId}`);
+  } finally {
+    elements.openClawTestBtn.disabled = false;
+  }
+}
+
+async function testLocalNotification() {
+  elements.localNotificationTestBtn.disabled = true;
+  appendLog("正在触发本地强提醒测试...");
+  triggerLocalAlert(
+    "本地强提醒测试",
+    "如果看到这个全屏闪烁页面并听到声音，说明浏览器侧本地提醒正常。\n真正有票时会自动出现同样提醒。"
+  );
+  try {
+    await fetchJson("/api/local-notification/test", { method: "POST" });
+    appendLog("本地原生提醒测试已请求");
+  } finally {
+    elements.localNotificationTestBtn.disabled = false;
+  }
+}
+
 function readConfigFromForm() {
   const defaults = {
     intervalSeconds: numberValue(elements.intervalInput.value, 30),
@@ -151,6 +195,7 @@ function readConfigFromForm() {
     maxParallelPages: numberValue(elements.parallelInput.value, 1),
     headless: elements.headlessInput.checked,
     browserChannel: elements.browserInput.value || "msedge",
+    autoEnterOrderPage: elements.autoEnterInput.checked,
     userDataDir: state.config.defaults.userDataDir ?? ".browser-profile",
     logFile: state.config.defaults.logFile ?? "logs/monitor.log",
     screenshotDir: state.config.defaults.screenshotDir ?? "logs/screenshots"
@@ -173,9 +218,9 @@ function readConfigFromForm() {
 
   const notifications = {
     openclaw: {
-      enabled: elements.openClawEnabledInput.checked,
-      url: textValue(elements.openClawUrlInput.value, "http://127.0.0.1:18789/hooks/wake"),
-      tokenEnv: textValue(elements.openClawTokenEnvInput.value, "OPENCLAW_HOOKS_TOKEN"),
+      enabled: false,
+      url: state.config.notifications.openclaw.url ?? "http://127.0.0.1:18789/hooks/wake",
+      tokenEnv: state.config.notifications.openclaw.tokenEnv ?? "OPENCLAW_HOOKS_TOKEN",
       mode: "now"
     }
   };
@@ -194,7 +239,9 @@ function connectStream() {
     applyStatus(JSON.parse(event.data));
   });
   source.addEventListener("log", (event) => {
-    appendLog(JSON.parse(event.data));
+    const line = JSON.parse(event.data);
+    appendLog(line);
+    handleAlertLog(line);
   });
 }
 
@@ -217,6 +264,121 @@ function applyStatus(status) {
 function appendLog(line) {
   elements.logOutput.textContent += `${elements.logOutput.textContent ? "\n" : ""}${line}`;
   scrollLog();
+}
+
+function handleAlertLog(line) {
+  if (typeof line !== "string") {
+    return;
+  }
+  if (!line.includes("Target available; manual handoff required") && !line.includes("Target blocked; monitor paused")) {
+    return;
+  }
+
+  const now = Date.now();
+  if (now - state.alert.lastLogAlertAt < 10_000) {
+    return;
+  }
+  state.alert.lastLogAlertAt = now;
+
+  if (line.includes("Target available; manual handoff required")) {
+    triggerLocalAlert(
+      "检测到有票",
+      "脚本已经检测到目标状态并完成浏览器交接。\n请立即查看 Edge 订单页。"
+    );
+    return;
+  }
+
+  triggerLocalAlert(
+    "监控已暂停",
+    "检测到登录、验证码、风控或页面阻断。\n请立即查看浏览器并手动处理。"
+  );
+}
+
+function triggerLocalAlert(title, message) {
+  if (state.alert.active) {
+    stopLocalAlert();
+  }
+  state.alert.active = true;
+  elements.localAlertTitle.textContent = title;
+  elements.localAlertMessage.textContent = message;
+  elements.localAlertOverlay.hidden = false;
+  elements.closeLocalAlertBtn.focus();
+  startTitleFlash(title);
+  startAudioAlarm();
+  showBrowserNotification(title, message);
+}
+
+function stopLocalAlert() {
+  state.alert.active = false;
+  elements.localAlertOverlay.hidden = true;
+  document.title = state.alert.originalTitle;
+  for (const timer of state.alert.timers) {
+    clearInterval(timer);
+    clearTimeout(timer);
+  }
+  state.alert.timers = [];
+}
+
+function startTitleFlash(title) {
+  let visible = false;
+  const timer = setInterval(() => {
+    if (!state.alert.active) {
+      return;
+    }
+    visible = !visible;
+    document.title = visible ? `!!! ${title} !!!` : state.alert.originalTitle;
+  }, 650);
+  state.alert.timers.push(timer);
+}
+
+function startAudioAlarm() {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) {
+      return;
+    }
+    state.alert.audioContext = state.alert.audioContext || new AudioContext();
+    void state.alert.audioContext.resume();
+    const beep = () => {
+      if (!state.alert.active) {
+        return;
+      }
+      const oscillator = state.alert.audioContext.createOscillator();
+      const gain = state.alert.audioContext.createGain();
+      oscillator.type = "square";
+      oscillator.frequency.value = 1200;
+      gain.gain.value = 0.22;
+      oscillator.connect(gain);
+      gain.connect(state.alert.audioContext.destination);
+      oscillator.start();
+      oscillator.stop(state.alert.audioContext.currentTime + 0.22);
+    };
+    beep();
+    const timer = setInterval(beep, 650);
+    state.alert.timers.push(timer);
+  } catch {
+    appendLog("浏览器音频提醒启动失败");
+  }
+}
+
+async function showBrowserNotification(title, message) {
+  if (!("Notification" in window)) {
+    return;
+  }
+  try {
+    let permission = Notification.permission;
+    if (permission === "default") {
+      permission = await Notification.requestPermission();
+    }
+    if (permission === "granted") {
+      new Notification(title, {
+        body: message,
+        requireInteraction: true
+      });
+    }
+  } catch {
+    appendLog("浏览器系统通知启动失败");
+  }
 }
 
 function scrollLog() {
@@ -243,6 +405,7 @@ function normalizeConfig(config) {
       maxParallelPages: 1,
       headless: false,
       browserChannel: "msedge",
+      autoEnterOrderPage: true,
       userDataDir: ".browser-profile",
       logFile: "logs/monitor.log",
       screenshotDir: "logs/screenshots",

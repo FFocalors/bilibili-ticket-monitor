@@ -47,5 +47,11 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 }
 
 Write-Host "Starting GUI: http://127.0.0.1:4173" -ForegroundColor Green
+Write-Host "OpenClaw pull bridge: http://127.0.0.1:4174/events?since=0" -ForegroundColor Green
+Write-Host "OpenClaw bridge listens on 0.0.0.0:4174 for WSL access." -ForegroundColor Green
 Write-Host "If your browser does not open automatically, copy the URL above." -ForegroundColor Yellow
+$env:GUI_HOST = "127.0.0.1"
+$env:GUI_PORT = "4173"
+$env:OPENCLAW_BRIDGE_HOST = "0.0.0.0"
+$env:OPENCLAW_BRIDGE_PORT = "4174"
 pnpm gui
