@@ -1,5 +1,10 @@
 import type { ButtonSnapshot, DetectionResult, NormalizedTarget } from "./types.js";
 
+interface KeywordLine {
+  original: string;
+  normalized: string;
+}
+
 const BLOCKED_PATTERNS = [
   /请先登录/,
   /登录后/,
@@ -74,6 +79,8 @@ export function detectAvailabilityFromText(
   target?: Pick<NormalizedTarget, "keywords">
 ): DetectionResult {
   const text = normalizeText(visibleText);
+  const targetKeywordLines = normalizeKeywordLines(target?.keywords ?? []);
+  const hasTargetKeywords = targetKeywordLines.length > 0;
   const forbiddenButton = firstMatchingButton(buttons, FORBIDDEN_ORDER_ACTION_PATTERNS, false);
   if (forbiddenButton) {
     return {
@@ -89,15 +96,6 @@ export function detectAvailabilityFromText(
       state: "blocked",
       reason: "Order or payment action is visible; manual handoff required.",
       matchedText: forbiddenText
-    };
-  }
-
-  const missingKeyword = firstMissingKeyword(text, target?.keywords ?? []);
-  if (missingKeyword) {
-    return {
-      state: "unknown",
-      reason: `Target keyword not visible: ${missingKeyword}`,
-      matchedText: missingKeyword
     };
   }
 
@@ -119,9 +117,36 @@ export function detectAvailabilityFromText(
     };
   }
 
-  const targetOption = classifyTargetOption(text, target?.keywords ?? []);
+  const missingKeywords = missingKeywordLines(text, targetKeywordLines);
+  if (missingKeywords.length > 0) {
+    return {
+      state: "unknown",
+      reason: `Target keyword lines not all visible: ${missingKeywords.map((keyword) => keyword.original).join(" | ")}`,
+      matchedText: missingKeywords[0].original
+    };
+  }
+
+  const targetButton = classifyTargetButtons(buttons, targetKeywordLines);
+  if (targetButton) {
+    return targetButton;
+  }
+
+  const targetOption = classifyTargetOption(text, targetKeywordLines);
   if (targetOption) {
     return targetOption;
+  }
+
+  if (hasTargetKeywords) {
+    const pageLevelSignal =
+      firstMatchingButton(buttons, AVAILABLE_BUTTON_PATTERNS, false)?.text ??
+      firstMatchingPattern(text, AVAILABLE_BUTTON_PATTERNS) ??
+      firstMatchingPattern(text, AVAILABLE_TEXT_PATTERNS) ??
+      firstMatchingPattern(text, SOLD_OUT_PATTERNS);
+    return {
+      state: "unknown",
+      reason: "Target keywords are visible, but target ticket option availability could not be confirmed.",
+      matchedText: pageLevelSignal
+    };
   }
 
   const availableButton = firstMatchingButton(buttons, AVAILABLE_BUTTON_PATTERNS, false);
@@ -192,10 +217,15 @@ export function extractButtonsFromHtml(html: string): ButtonSnapshot[] {
     if (!body) {
       continue;
     }
-    buttons.push({
+    const selected = /\b(active|selected|checked|current)\b/i.test(attributes) || /aria-selected=["']?true/i.test(attributes);
+    const snapshot: ButtonSnapshot = {
       text: body,
       disabled: /\bdisabled\b/i.test(attributes) || /aria-disabled=["']?true/i.test(attributes)
-    });
+    };
+    if (selected) {
+      snapshot.selected = true;
+    }
+    buttons.push(snapshot);
   }
 
   return buttons;
@@ -212,23 +242,36 @@ function normalizeText(value: string): string {
     .trim();
 }
 
-function firstMissingKeyword(text: string, keywords: string[]): string | undefined {
+function normalizeKeywordLines(keywords: string[]): KeywordLine[] {
+  return keywords
+    .map((keyword) => {
+      const original = keyword.trim();
+      return {
+        original,
+        normalized: normalizeText(original)
+      };
+    })
+    .filter((keyword) => keyword.normalized.length > 0);
+}
+
+function missingKeywordLines(text: string, keywords: KeywordLine[]): KeywordLine[] {
   const compactText = compactForKeywordMatch(text);
-  return keywords.find((keyword) => {
-    const normalizedKeyword = normalizeText(keyword);
-    return !text.includes(normalizedKeyword) && !compactText.includes(compactForKeywordMatch(normalizedKeyword));
-  });
+  return keywords.filter((keyword) => !keywordLineMatches(text, compactText, keyword));
+}
+
+function keywordLineMatches(text: string, compactText: string, keyword: KeywordLine): boolean {
+  return text.includes(keyword.normalized) || compactText.includes(compactForKeywordMatch(keyword.normalized));
 }
 
 function compactForKeywordMatch(value: string): string {
   return normalizeText(value).replace(/\s+/g, "");
 }
 
-function classifyTargetOption(text: string, keywords: string[]): DetectionResult | undefined {
+function classifyTargetOption(text: string, keywords: KeywordLine[]): DetectionResult | undefined {
   const optionKeywords = keywords
-    .map(normalizeText)
+    .map((keyword) => keyword.normalized)
     .filter((keyword) => keyword.length > 0 && !isDateKeyword(keyword));
-  if (optionKeywords.length < 2) {
+  if (optionKeywords.length === 0) {
     return undefined;
   }
 
@@ -238,7 +281,8 @@ function classifyTargetOption(text: string, keywords: string[]): DetectionResult
     return undefined;
   }
 
-  const available = matches.find((fragment) => !firstMatchingPattern(fragment, SOLD_OUT_PATTERNS));
+  const availableMatches = matches.filter((fragment) => !firstMatchingPattern(fragment, SOLD_OUT_PATTERNS));
+  const available = availableMatches[0];
   if (available) {
     return {
       state: "available",
@@ -251,6 +295,60 @@ function classifyTargetOption(text: string, keywords: string[]): DetectionResult
     state: "sold_out",
     reason: "Target ticket option is sold out.",
     matchedText: matches[0]
+  };
+}
+
+function classifyTargetButtons(buttons: ButtonSnapshot[], keywords: KeywordLine[]): DetectionResult | undefined {
+  const normalizedKeywords = keywords.map((keyword) => keyword.normalized).filter(Boolean);
+  if (normalizedKeywords.length === 0) {
+    return undefined;
+  }
+
+  const optionButtons = buttons.filter((button) => !isGenericActionText(button.text));
+  const dateKeywords = normalizedKeywords.filter(isDateKeyword);
+  let matchedEnabledDate = false;
+  for (const dateKeyword of dateKeywords) {
+    const matches = optionButtons.filter((button) => containsAllKeywords(button.text, [dateKeyword]));
+    const disabled = matches.find((button) => button.disabled || Boolean(firstMatchingPattern(normalizeText(button.text), SOLD_OUT_PATTERNS)));
+    if (disabled) {
+      return {
+        state: "sold_out",
+        reason: "Target date/session option is disabled or unavailable.",
+        matchedText: disabled.text
+      };
+    }
+    if (matches.some((button) => !button.disabled)) {
+      matchedEnabledDate = true;
+    }
+  }
+
+  const optionKeywords = normalizedKeywords.filter((keyword) => !isDateKeyword(keyword));
+  if (optionKeywords.length === 0) {
+    return undefined;
+  }
+
+  const matches = optionButtons.filter((button) => containsAllKeywords(button.text, optionKeywords));
+  if (matches.length === 0) {
+    return undefined;
+  }
+
+  const availableMatches = matches.filter((button) => !button.disabled && !firstMatchingPattern(normalizeText(button.text), SOLD_OUT_PATTERNS));
+  const selectedAvailable = availableMatches.find((button) => button.selected);
+  const available = selectedAvailable ?? availableMatches[0];
+  if (available) {
+    return {
+      state: "available",
+      reason: matchedEnabledDate
+        ? "Target date/session and ticket option buttons appear available."
+        : "Target ticket option button appears available.",
+      matchedText: available.text
+    };
+  }
+
+  return {
+    state: "sold_out",
+    reason: "Target ticket option button is disabled or sold out.",
+    matchedText: matches[0].text
   };
 }
 
@@ -287,4 +385,9 @@ function firstMatchingButton(buttons: ButtonSnapshot[], patterns: RegExp[], allo
     }
     return patterns.some((pattern) => pattern.test(button.text));
   });
+}
+
+function isGenericActionText(text: string): boolean {
+  const normalizedText = normalizeText(text);
+  return [...AVAILABLE_BUTTON_PATTERNS, ...FORBIDDEN_ORDER_ACTION_PATTERNS].some((pattern) => pattern.test(normalizedText));
 }

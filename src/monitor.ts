@@ -13,6 +13,7 @@ interface TargetRuntime {
   nextAt: number;
   failures: number;
   halted: boolean;
+  availableAlerted: boolean;
   page?: Page;
 }
 
@@ -52,7 +53,8 @@ export async function runMonitor(config: MonitorConfig, options: RunMonitorOptio
       target,
       nextAt: Date.now() + index * 750,
       failures: 0,
-      halted: false
+      halted: false,
+      availableAlerted: false
     }));
 
     while (runtimes.some((runtime) => !runtime.halted)) {
@@ -92,7 +94,7 @@ async function inspectTarget(
     const page = await getTargetPage(context, runtime);
     if (!isManualHandoffUrl(page.url())) {
       await page.goto(target.url, { waitUntil: "domcontentloaded", timeout: 45000 });
-      await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => undefined);
+      await page.waitForLoadState("networkidle", { timeout: 2500 }).catch(() => undefined);
     }
 
     const result = await detectPageState(page, target);
@@ -106,27 +108,34 @@ async function inspectTarget(
 
     if (result.state === "available") {
       await page.bringToFront();
-      const handoff = await prepareAvailableHandoff(page, target, result, config.defaults.autoEnterOrderPage);
-
-      if (handoff.enteredOrderPage || !config.defaults.autoEnterOrderPage) {
-        runtime.halted = true;
-        const screenshot = await saveScreenshot(page, config.defaults.screenshotDir, target, handoff.enteredOrderPage ? "order-entry" : "available");
+      if (!runtime.availableAlerted) {
+        runtime.availableAlerted = true;
+        await logger.warn("Target availability detected; attempting order handoff", {
+          target: target.id,
+          matchedText: result.matchedText
+        });
         await sendNotifications(config, logger, {
-          title: "Bilibili ticket available",
-          message: `${target.eventName} / ${target.name}: ${handoff.message}`,
+          title: "检测到有票",
+          message: `${target.eventName} / ${target.name}: 已检测到目标有票，正在尝试进入订单页。`,
           details: {
             target: target.id,
             url: target.url,
             matchedText: result.matchedText,
-            clickedEntry: handoff.clickedEntry,
-            enteredOrderPage: handoff.enteredOrderPage,
-            hovered: handoff.hovered,
-            screenshot
+            stage: "detected"
           }
         });
+      }
+
+      const handoff = await prepareAvailableHandoff(page, target, result, config.defaults.autoEnterOrderPage);
+
+      if (handoff.enteredOrderPage || !config.defaults.autoEnterOrderPage) {
+        runtime.halted = true;
+        const handoffPage = handoff.handoffPage ?? page;
+        const screenshot = await saveScreenshot(handoffPage, config.defaults.screenshotDir, target, handoff.enteredOrderPage ? "order-entry" : "available");
+        const { handoffPage: _handoffPage, ...handoffLog } = handoff;
         await logger.warn("Target available; manual handoff required", {
           target: target.id,
-          ...handoff,
+          ...handoffLog,
           screenshot
         });
         return;
@@ -137,10 +146,12 @@ async function inspectTarget(
       await logger.warn("Purchase entry click did not reach order page; retry scheduled", {
         target: target.id,
         retryInMs: runtime.nextAt - Date.now(),
-        ...handoff
+        ...formatHandoffForLog(handoff)
       });
       return;
     }
+
+    runtime.availableAlerted = false;
 
     if (result.state === "blocked") {
       runtime.halted = true;
@@ -166,7 +177,7 @@ async function inspectTarget(
     }
 
     if (result.state === "unknown") {
-      await saveUnknownSnapshot(page, config.defaults.screenshotDir, target);
+      await saveUnknownSnapshot(page, config.defaults.screenshotDir, target, logger);
     }
 
     runtime.failures = 0;
@@ -218,6 +229,7 @@ async function prepareAvailableHandoff(
   message: string;
   postClickState?: string;
   postClickReason?: string;
+  handoffPage?: Page;
 }> {
   if (!autoEnterOrderPage) {
     return {
@@ -228,7 +240,7 @@ async function prepareAvailableHandoff(
     };
   }
 
-  const entryButton = await findActionButton(page, result.matchedText, AVAILABLE_BUTTON_PATTERNS);
+  const entryButton = await findActionButton(page, undefined, AVAILABLE_BUTTON_PATTERNS);
   if (!entryButton) {
     return {
       clickedEntry: false,
@@ -239,16 +251,22 @@ async function prepareAvailableHandoff(
   }
 
   try {
+    const popupPromise = page.waitForEvent("popup", { timeout: 4000 }).catch(() => undefined);
     await entryButton.scrollIntoViewIfNeeded({ timeout: 3000 });
     await clickActionAtCenter(page, entryButton);
-    await page.waitForURL(/\/confirmOrder\.html/i, { timeout: 8000 }).catch(() => undefined);
-    await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => undefined);
-    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => undefined);
-    await page.waitForTimeout(800);
+    const popup = await popupPromise;
+    const handoffPage = popup ?? page;
+    await handoffPage.bringToFront().catch(() => undefined);
+    await handoffPage.waitForURL(/\/confirmOrder\.html/i, { timeout: 5000 }).catch(() => undefined);
+    await handoffPage.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => undefined);
+    await handoffPage.waitForTimeout(300);
 
-    const postClickResult = await detectPageState(page, target);
-    const enteredOrderPage = isManualHandoffUrl(page.url()) || isOrderHandoffResult(postClickResult);
-    const hoveredOrder = enteredOrderPage ? await hoverManualHandoffButton(page, postClickResult, "order") : false;
+    const postClickResult = await detectPageState(handoffPage, target);
+    const enteredOrderPage = isManualHandoffUrl(handoffPage.url()) || isOrderHandoffResult(postClickResult);
+    const hoveredOrder = enteredOrderPage ? await hoverManualHandoffButton(handoffPage, postClickResult, "order") : false;
+    if (popup && !enteredOrderPage) {
+      await popup.close().catch(() => undefined);
+    }
     return {
       clickedEntry: true,
       enteredOrderPage,
@@ -259,7 +277,8 @@ async function prepareAvailableHandoff(
           ? "Entered order information page; please continue manually."
           : "Clicked purchase entry, but order information page was not reached.",
       postClickState: postClickResult.state,
-      postClickReason: postClickResult.reason
+      postClickReason: postClickResult.reason,
+      handoffPage: enteredOrderPage ? handoffPage : undefined
     };
   } catch (error) {
     return {
@@ -287,17 +306,43 @@ async function clickActionAtCenter(page: Page, locator: Locator): Promise<void> 
 
 async function detectPageState(page: Page, target: NormalizedTarget): Promise<DetectionResult> {
   const visibleText = await page.locator("body").innerText({ timeout: 10000 }).catch(() => "");
-  const buttons = await page.locator(actionElementSelector()).evaluateAll((elements) =>
+  const buttons = await page.locator(detectionElementSelector()).evaluateAll((elements) =>
     elements
       .map((element) => {
         const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        const className = element.className.toString().toLowerCase();
         const disabled =
           element.hasAttribute("disabled") ||
           element.getAttribute("aria-disabled") === "true" ||
-          element.className.toString().toLowerCase().includes("disabled");
-        return { text, disabled };
+          className.includes("disabled") ||
+          className.includes("disable") ||
+          className.includes("sold") ||
+          /已售罄|售罄|不可售|暂未开售|即将开售/.test(text);
+        const selected =
+          element.getAttribute("aria-selected") === "true" ||
+          className.includes("active") ||
+          className.includes("selected") ||
+          className.includes("checked") ||
+          className.includes("current") ||
+          className.includes("choose") ||
+          className.includes("picked");
+        const visible =
+          style.visibility !== "hidden" &&
+          style.display !== "none" &&
+          text.length <= 180 &&
+          rect.width > 8 &&
+          rect.height > 8 &&
+          rect.width < 900 &&
+          rect.height < 220;
+        const relevantText =
+          /\d{4}[./-]\d{1,2}[./-]\d{1,2}/.test(text) ||
+          /[¥￥]\s*\d+/.test(text) ||
+          /立即购|购买|购票|支付|订单|售罄|不可售|开售/.test(text);
+        return visible && relevantText ? { text, disabled, selected } : undefined;
       })
-      .filter((button) => button.text.length > 0)
+      .filter((button): button is { text: string; disabled: boolean; selected: boolean } => Boolean(button && button.text.length > 0))
   );
 
   return detectAvailabilityFromText(visibleText, buttons, target);
@@ -309,7 +354,7 @@ async function hoverManualHandoffButton(
   kind: "available" | "order"
 ): Promise<boolean> {
   const patterns = kind === "available" ? AVAILABLE_BUTTON_PATTERNS : FORBIDDEN_ORDER_ACTION_PATTERNS;
-  const button = await findActionButton(page, result.matchedText, patterns);
+  const button = await findActionButton(page, kind === "order" ? result.matchedText : undefined, patterns);
   if (!button) {
     return false;
   }
@@ -321,6 +366,11 @@ async function hoverManualHandoffButton(
   } catch {
     return false;
   }
+}
+
+function formatHandoffForLog(handoff: Awaited<ReturnType<typeof prepareAvailableHandoff>>): Omit<Awaited<ReturnType<typeof prepareAvailableHandoff>>, "handoffPage"> {
+  const { handoffPage: _handoffPage, ...handoffLog } = handoff;
+  return handoffLog;
 }
 
 async function findActionButton(
@@ -436,6 +486,10 @@ function actionElementSelector(): string {
   ].join(", ");
 }
 
+function detectionElementSelector(): string {
+  return "body *";
+}
+
 function isOrderHandoffResult(result: DetectionResult): boolean {
   return (
     result.state === "blocked" &&
@@ -483,11 +537,18 @@ async function saveScreenshot(page: Page, screenshotDir: string, target: Normali
   return filePath;
 }
 
-async function saveUnknownSnapshot(page: Page, screenshotDir: string, target: NormalizedTarget): Promise<void> {
-  const screenshot = await saveScreenshot(page, screenshotDir, target, "unknown");
-  const domPath = screenshot.replace(/\.png$/i, ".txt");
-  const bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
-  await writeFile(domPath, bodyText.slice(0, 20_000), "utf8");
+async function saveUnknownSnapshot(page: Page, screenshotDir: string, target: NormalizedTarget, logger: Logger): Promise<void> {
+  try {
+    const screenshot = await saveScreenshot(page, screenshotDir, target, "unknown");
+    const domPath = screenshot.replace(/\.png$/i, ".txt");
+    const bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+    await writeFile(domPath, bodyText.slice(0, 20_000), "utf8");
+  } catch (error) {
+    await logger.warn("Unknown snapshot save failed", {
+      target: target.id,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
 }
 
 function createShutdown(context: BrowserContext, logger: Logger): () => void {

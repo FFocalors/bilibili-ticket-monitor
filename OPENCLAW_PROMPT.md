@@ -26,9 +26,11 @@ Windows 侧前置条件：
       {
         "id": 1,
         "time": "2026-04-21T14:00:00.000Z",
-        "title": "Bilibili ticket available",
+        "title": "检测到有票",
         "message": "...",
-        "details": {}
+        "details": {
+          "stage": "detected"
+        }
       }
     ],
     "latestId": 1,
@@ -60,6 +62,7 @@ Windows 侧前置条件：
    - 维护一个 `since`，初始为 `0`。
    - 每 5 秒请求：`GET http://<windows-host>:4174/events?since=<since>`。
    - 如果 `events` 非空，逐条把 `title`、`message`、`details` 作为 OpenClaw 通知/提醒输出给我。
+   - 只要收到事件就提醒我，不要依赖固定标题；有票事件通常会使用 `检测到有票`，阻断事件通常会使用 `Bilibili monitor paused`。
    - 每次请求后把 `since` 更新为响应里的 `nextSince`。
    - 如果连接失败，指数退避重试，最长 60 秒。
 6. 请先用以下命令验证能拉到测试事件：
@@ -70,7 +73,7 @@ Windows 侧前置条件：
 7. 验收标准：
    - `/health` 返回 `ok: true`。
    - 我在 Windows GUI 点击“测试 OpenClaw”后，你能在 `/events?since=0` 看到一条 `Bilibili 会员购监控测试`。
-   - 监控脚本检测到有票后，你能把 `Bilibili ticket available` 事件通知给我。
+   - 监控脚本检测到有票后，你能把 `检测到有票` 这类可用事件通知给我。
 
 请直接执行检查并汇报你最终使用的桥接 URL，例如：
 

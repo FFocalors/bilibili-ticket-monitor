@@ -62,6 +62,7 @@ export interface NormalizedTarget {
 export interface ButtonSnapshot {
   text: string;
   disabled: boolean;
+  selected?: boolean;
 }
 
 export interface DetectionResult {

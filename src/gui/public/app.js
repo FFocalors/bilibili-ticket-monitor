@@ -270,7 +270,9 @@ function handleAlertLog(line) {
   if (typeof line !== "string") {
     return;
   }
-  if (!line.includes("Target available; manual handoff required") && !line.includes("Target blocked; monitor paused")) {
+  const availabilityDetected = line.includes("Target availability detected; attempting order handoff");
+  const handoffReady = line.includes("Target available; manual handoff required");
+  if (!availabilityDetected && !handoffReady && !line.includes("Target blocked; monitor paused")) {
     return;
   }
 
@@ -280,7 +282,15 @@ function handleAlertLog(line) {
   }
   state.alert.lastLogAlertAt = now;
 
-  if (line.includes("Target available; manual handoff required")) {
+  if (availabilityDetected) {
+    triggerLocalAlert(
+      "检测到有票",
+      "已检测到目标有票，脚本正在尝试进入订单页。\n请立即查看 Edge。"
+    );
+    return;
+  }
+
+  if (handoffReady) {
     triggerLocalAlert(
       "检测到有票",
       "脚本已经检测到目标状态并完成浏览器交接。\n请立即查看 Edge 订单页。"
