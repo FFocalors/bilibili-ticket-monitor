@@ -117,18 +117,24 @@ export function detectAvailabilityFromText(
     };
   }
 
-  const missingKeywords = missingKeywordLines(text, targetKeywordLines);
+  // Build combined search text from page text + button texts for keyword visibility check
+  const buttonTexts = buttons.map((b) => normalizeText(b.text));
+  const combinedSearchText = [text, ...buttonTexts].join(" ");
+
+  // Try button-based classification first (works even if keywords are only in button text)
+  const targetButton = classifyTargetButtons(buttons, targetKeywordLines);
+  if (targetButton) {
+    return targetButton;
+  }
+
+  // Check keyword visibility using combined text (page + buttons)
+  const missingKeywords = missingKeywordLines(combinedSearchText, targetKeywordLines);
   if (missingKeywords.length > 0) {
     return {
       state: "unknown",
       reason: `Target keyword lines not all visible: ${missingKeywords.map((keyword) => keyword.original).join(" | ")}`,
       matchedText: missingKeywords[0].original
     };
-  }
-
-  const targetButton = classifyTargetButtons(buttons, targetKeywordLines);
-  if (targetButton) {
-    return targetButton;
   }
 
   const targetOption = classifyTargetOption(text, targetKeywordLines);
@@ -334,7 +340,7 @@ function classifyTargetButtons(buttons: ButtonSnapshot[], keywords: KeywordLine[
 
   const availableMatches = matches.filter((button) => !button.disabled && !firstMatchingPattern(normalizeText(button.text), SOLD_OUT_PATTERNS));
   const selectedAvailable = availableMatches.find((button) => button.selected);
-  const available = selectedAvailable ?? availableMatches[0];
+  const available = selectedAvailable ?? pickShortestText(availableMatches);
   if (available) {
     return {
       state: "available",
@@ -364,7 +370,7 @@ function containsAllKeywords(text: string, keywords: string[]): boolean {
   return keywords.every((keyword) => compactText.includes(compactForKeywordMatch(keyword)));
 }
 
-function isDateKeyword(value: string): boolean {
+export function isDateKeyword(value: string): boolean {
   return /\b\d{4}[./-]\d{1,2}[./-]\d{1,2}\b/.test(value);
 }
 
@@ -390,4 +396,13 @@ function firstMatchingButton(buttons: ButtonSnapshot[], patterns: RegExp[], allo
 function isGenericActionText(text: string): boolean {
   const normalizedText = normalizeText(text);
   return [...AVAILABLE_BUTTON_PATTERNS, ...FORBIDDEN_ORDER_ACTION_PATTERNS].some((pattern) => pattern.test(normalizedText));
+}
+
+function pickShortestText<T extends ButtonSnapshot>(buttons: T[]): T | undefined {
+  if (buttons.length === 0) {
+    return undefined;
+  }
+  return buttons.reduce((shortest, button) =>
+    button.text.length < shortest.text.length ? button : shortest
+  );
 }

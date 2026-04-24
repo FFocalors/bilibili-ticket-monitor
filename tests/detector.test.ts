@@ -261,10 +261,47 @@ test("detects order information page from visible text", () => {
 });
 
 test("extracts fixture text and button snapshots", () => {
-  const html = "<button disabled>已售罄</button><a>立即购买</a>";
-  assert.equal(extractTextFromHtml(html), "已售罄 立即购买");
+  const html = "<button disabled>\u5df2\u552e\u7f44</button><a>\u7acb\u5373\u8d2d\u4e70</a>";
+  assert.equal(extractTextFromHtml(html), "\u5df2\u552e\u7f44 \u7acb\u5373\u8d2d\u4e70");
   assert.deepEqual(extractButtonsFromHtml(html), [
-    { text: "已售罄", disabled: true },
-    { text: "立即购买", disabled: false }
+    { text: "\u5df2\u552e\u7f44", disabled: true },
+    { text: "\u7acb\u5373\u8d2d\u4e70", disabled: false }
   ]);
+});
+
+test("detects availability when keyword is only in button text, not in page text", () => {
+  const result = detectAvailabilityFromText("\u6d3b\u52a8\u8be6\u60c5 \u7acb\u5373\u8d2d\u7968", [
+    { text: "2026.4.25", disabled: false, selected: true },
+    { text: "\u00a588(\u5357\u4eac\u8230\u5343\u4eba\u5bb4)", disabled: false, selected: true },
+    { text: "\u7acb\u5373\u8d2d\u7968", disabled: false }
+  ], { keywords: ["2026.4.25", "\u00a588", "\u5357\u4eac"] });
+
+  assert.equal(result.state, "available");
+});
+
+test("disambiguates multiple same-price buttons by additional keyword", () => {
+  const result = detectAvailabilityFromText(
+    "2026.4.25 \u00a588(\u5357\u4eac\u8230\u5343\u4eba\u5bb4) \u00a588(coser\u7279\u6548\u7968) \u7acb\u5373\u8d2d\u7968",
+    [
+      { text: "2026.4.25", disabled: false, selected: true },
+      { text: "\u00a588(\u5357\u4eac\u8230\u5343\u4eba\u5bb4)", disabled: false },
+      { text: "\u00a588(coser\u7279\u6548\u7968)", disabled: false },
+      { text: "\u7acb\u5373\u8d2d\u7968", disabled: false }
+    ],
+    { keywords: ["2026.4.25", "\u00a588", "\u5357\u4eac"] }
+  );
+
+  assert.equal(result.state, "available");
+  assert.equal(result.matchedText, "\u00a588(\u5357\u4eac\u8230\u5343\u4eba\u5bb4)");
+});
+
+test("button classification runs before keyword text check", () => {
+  const result = detectAvailabilityFromText("", [
+    { text: "2026-05-08 \u5468\u4e94", disabled: false, selected: true },
+    { text: "\u00a5488(\u5185\u573aA1\u533a)", disabled: false },
+    { text: "\u7acb\u5373\u8d2d\u7968", disabled: false }
+  ], { keywords: ["2026-05-08", "\uffe5488", "\u5185\u573a"] });
+
+  assert.equal(result.state, "available");
+  assert.equal(result.reason, "Target date/session and ticket option buttons appear available.");
 });
