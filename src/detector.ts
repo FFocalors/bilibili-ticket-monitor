@@ -5,6 +5,13 @@ interface KeywordLine {
   normalized: string;
 }
 
+export interface TargetButtonSelectionPlan<T extends ButtonSnapshot = ButtonSnapshot> {
+  dateSelections: T[];
+  optionSelection?: T;
+  unavailableReason?: string;
+  unavailableText?: string;
+}
+
 const BLOCKED_PATTERNS = [
   /请先登录/,
   /登录后/,
@@ -274,6 +281,7 @@ function compactForKeywordMatch(value: string): string {
 }
 
 function classifyTargetOption(text: string, keywords: KeywordLine[]): DetectionResult | undefined {
+  const hasDateKeyword = keywords.some((keyword) => isDateKeyword(keyword.normalized));
   const optionKeywords = keywords
     .map((keyword) => keyword.normalized)
     .filter((keyword) => keyword.length > 0 && !isDateKeyword(keyword));
@@ -288,6 +296,10 @@ function classifyTargetOption(text: string, keywords: KeywordLine[]): DetectionR
   }
 
   const availableMatches = matches.filter((fragment) => !firstMatchingPattern(fragment, SOLD_OUT_PATTERNS));
+  if (hasDateKeyword && availableMatches.length > 0) {
+    return undefined;
+  }
+
   const available = availableMatches[0];
   if (available) {
     return {
@@ -305,57 +317,55 @@ function classifyTargetOption(text: string, keywords: KeywordLine[]): DetectionR
 }
 
 function classifyTargetButtons(buttons: ButtonSnapshot[], keywords: KeywordLine[]): DetectionResult | undefined {
-  const normalizedKeywords = keywords.map((keyword) => keyword.normalized).filter(Boolean);
-  if (normalizedKeywords.length === 0) {
+  const plan = buildTargetButtonSelectionPlan(buttons, keywords);
+  if (!plan) {
     return undefined;
   }
 
-  const optionButtons = buttons.filter((button) => !isGenericActionText(button.text));
-  const dateKeywords = normalizedKeywords.filter(isDateKeyword);
-  let matchedEnabledDate = false;
-  for (const dateKeyword of dateKeywords) {
-    const matches = optionButtons.filter((button) => containsAllKeywords(button.text, [dateKeyword]));
-    const disabled = matches.find((button) => button.disabled || Boolean(firstMatchingPattern(normalizeText(button.text), SOLD_OUT_PATTERNS)));
-    if (disabled) {
-      return {
-        state: "sold_out",
-        reason: "Target date/session option is disabled or unavailable.",
-        matchedText: disabled.text
-      };
-    }
-    if (matches.some((button) => !button.disabled)) {
-      matchedEnabledDate = true;
-    }
-  }
-
-  const optionKeywords = normalizedKeywords.filter((keyword) => !isDateKeyword(keyword));
-  if (optionKeywords.length === 0) {
-    return undefined;
-  }
-
-  const matches = optionButtons.filter((button) => containsAllKeywords(button.text, optionKeywords));
-  if (matches.length === 0) {
-    return undefined;
-  }
-
-  const availableMatches = matches.filter((button) => !button.disabled && !firstMatchingPattern(normalizeText(button.text), SOLD_OUT_PATTERNS));
-  const selectedAvailable = availableMatches.find((button) => button.selected);
-  const available = selectedAvailable ?? pickShortestText(availableMatches);
-  if (available) {
+  if (plan.unavailableReason && plan.unavailableText) {
     return {
-      state: "available",
-      reason: matchedEnabledDate
-        ? "Target date/session and ticket option buttons appear available."
-        : "Target ticket option button appears available.",
-      matchedText: available.text
+      state: "sold_out",
+      reason: plan.unavailableReason,
+      matchedText: plan.unavailableText
     };
   }
 
-  return {
-    state: "sold_out",
-    reason: "Target ticket option button is disabled or sold out.",
-    matchedText: matches[0].text
-  };
+  if (plan.dateSelections.some((button) => !button.selected)) {
+    return {
+      state: "unknown",
+      reason: "Target date/session option is available but not selected.",
+      matchedText: plan.dateSelections.find((button) => !button.selected)?.text
+    };
+  }
+
+  if (plan.optionSelection) {
+    if (!plan.optionSelection.selected) {
+      return {
+        state: "unknown",
+        reason: "Target ticket option is available but not selected.",
+        matchedText: plan.optionSelection.text
+      };
+    }
+
+    const entryButton = firstMatchingButton(buttons, AVAILABLE_BUTTON_PATTERNS, false);
+    if (!entryButton) {
+      return {
+        state: "unknown",
+        reason: "Target date/session and ticket option are selected, but purchase entry is not available.",
+        matchedText: plan.optionSelection.text
+      };
+    }
+
+    return {
+      state: "available",
+      reason: plan.dateSelections.length > 0
+        ? "Target date/session and ticket option buttons appear available."
+        : "Target ticket option button appears available.",
+      matchedText: plan.optionSelection.text
+    };
+  }
+
+  return undefined;
 }
 
 function extractPriceFragments(text: string): string[] {
@@ -398,11 +408,78 @@ function isGenericActionText(text: string): boolean {
   return [...AVAILABLE_BUTTON_PATTERNS, ...FORBIDDEN_ORDER_ACTION_PATTERNS].some((pattern) => pattern.test(normalizedText));
 }
 
-function pickShortestText<T extends ButtonSnapshot>(buttons: T[]): T | undefined {
-  if (buttons.length === 0) {
+export function planTargetButtonSelection<T extends ButtonSnapshot>(
+  buttons: T[],
+  target?: Pick<NormalizedTarget, "keywords">
+): TargetButtonSelectionPlan<T> | undefined {
+  const targetKeywordLines = normalizeKeywordLines(target?.keywords ?? []);
+  return buildTargetButtonSelectionPlan(buttons, targetKeywordLines);
+}
+
+function buildTargetButtonSelectionPlan<T extends ButtonSnapshot>(
+  buttons: T[],
+  keywords: KeywordLine[]
+): TargetButtonSelectionPlan<T> | undefined {
+  const normalizedKeywords = keywords.map((keyword) => keyword.normalized).filter(Boolean);
+  if (normalizedKeywords.length === 0) {
     return undefined;
   }
+
+  const optionButtons = buttons.filter((button) => !isGenericActionText(button.text));
+  const dateKeywords = normalizedKeywords.filter(isDateKeyword);
+  const dateSelections: T[] = [];
+
+  for (const dateKeyword of dateKeywords) {
+    const matches = optionButtons.filter((button) => containsAllKeywords(button.text, [dateKeyword]));
+    if (matches.length === 0) {
+      return undefined;
+    }
+
+    const availableMatches = matches.filter((button) => !button.disabled && !isSoldOutText(button.text));
+    if (availableMatches.length === 0) {
+      return {
+        dateSelections,
+        unavailableReason: "Target date/session option is disabled or unavailable.",
+        unavailableText: matches[0].text
+      };
+    }
+
+    dateSelections.push(availableMatches.find((button) => button.selected) ?? pickShortestText(availableMatches));
+  }
+
+  const optionKeywords = normalizedKeywords.filter((keyword) => !isDateKeyword(keyword));
+  if (optionKeywords.length === 0) {
+    return {
+      dateSelections
+    };
+  }
+
+  const matches = optionButtons.filter((button) => containsAllKeywords(button.text, optionKeywords));
+  if (matches.length === 0) {
+    return undefined;
+  }
+
+  const availableMatches = matches.filter((button) => !button.disabled && !isSoldOutText(button.text));
+  if (availableMatches.length === 0) {
+    return {
+      dateSelections,
+      unavailableReason: "Target ticket option button is disabled or sold out.",
+      unavailableText: matches[0].text
+    };
+  }
+
+  return {
+    dateSelections,
+    optionSelection: availableMatches.find((button) => button.selected) ?? pickShortestText(availableMatches)
+  };
+}
+
+function pickShortestText<T extends ButtonSnapshot>(buttons: T[]): T {
   return buttons.reduce((shortest, button) =>
     button.text.length < shortest.text.length ? button : shortest
   );
+}
+
+function isSoldOutText(text: string): boolean {
+  return Boolean(firstMatchingPattern(normalizeText(text), SOLD_OUT_PATTERNS));
 }

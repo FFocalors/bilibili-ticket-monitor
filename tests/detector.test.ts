@@ -3,7 +3,8 @@ import test from "node:test";
 import {
   detectAvailabilityFromText,
   extractButtonsFromHtml,
-  extractTextFromHtml
+  extractTextFromHtml,
+  planTargetButtonSelection
 } from "../src/detector.js";
 
 test("detects enabled purchase button as available", () => {
@@ -65,6 +66,8 @@ test("requires every configured keyword line before alerting", () => {
 
 test("ignores blank keyword lines while requiring all non-empty lines", () => {
   const result = detectAvailabilityFromText("2026-05-08 周五 ￥488 内场 立即购票", [
+    { text: "2026-05-08 周五", disabled: false, selected: true },
+    { text: "￥488 内场", disabled: false, selected: true },
     { text: "立即购票", disabled: false }
   ], { keywords: ["2026-05-08", "", "  ", "￥488", "内场"] });
 
@@ -73,6 +76,8 @@ test("ignores blank keyword lines while requiring all non-empty lines", () => {
 
 test("matches target keywords while ignoring whitespace differences", () => {
   const result = detectAvailabilityFromText("2026.4.24 ￥ 138 老外 难游轮票", [
+    { text: "2026.4.24", disabled: false, selected: true },
+    { text: "￥ 138 老外 难游轮票", disabled: false, selected: true },
     { text: "立即购票", disabled: false }
   ], { keywords: ["2026.4.24", "￥138", "老外难游轮票"] });
 
@@ -81,6 +86,8 @@ test("matches target keywords while ignoring whitespace differences", () => {
 
 test("matches date keywords with or without zero padding", () => {
   const result = detectAvailabilityFromText("2026-05-08 周五 ￥ 488 内场 A1区", [
+    { text: "2026-05-08 周五", disabled: false, selected: true },
+    { text: "￥ 488 内场 A1区", disabled: false, selected: true },
     { text: "立即购票", disabled: false }
   ], { keywords: ["2026-5-8 周五", "￥488", "内场"] });
 
@@ -100,6 +107,8 @@ test("does not use another ticket option's purchase button for the target", () =
 
 test("matches yuan symbols across fullwidth and halfwidth forms", () => {
   const result = detectAvailabilityFromText("2026.4.24 ¥ 138 老外 难游轮票", [
+    { text: "2026.4.24", disabled: false, selected: true },
+    { text: "¥ 138 老外 难游轮票", disabled: false, selected: true },
     { text: "立即购票", disabled: false }
   ], { keywords: ["2026.4.24", "￥138", "老外难游轮票"] });
 
@@ -164,12 +173,27 @@ test("does not alert when target ticket option button is disabled", () => {
   assert.equal(result.reason, "Target ticket option button is disabled or sold out.");
 });
 
-test("detects target option buttons as available when date and ticket are enabled", () => {
+test("does not alert when target date and ticket are available but not selected", () => {
   const result = detectAvailabilityFromText(
     "2026-05-08 周五 ¥488(内场A3区) 立即购票",
     [
       { text: "2026-05-08 周五", disabled: false },
       { text: "¥488(内场A3区)", disabled: false },
+      { text: "立即购票", disabled: false }
+    ],
+    { keywords: ["2026-05-08", "￥488", "内场"] }
+  );
+
+  assert.equal(result.state, "unknown");
+  assert.equal(result.reason, "Target date/session option is available but not selected.");
+});
+
+test("detects target option buttons as available only after date and ticket are selected", () => {
+  const result = detectAvailabilityFromText(
+    "2026-05-08 周五 ¥488(内场A3区) 立即购票",
+    [
+      { text: "2026-05-08 周五", disabled: false, selected: true },
+      { text: "¥488(内场A3区)", disabled: false, selected: true },
       { text: "立即购票", disabled: false }
     ],
     { keywords: ["2026-05-08", "￥488", "内场"] }
@@ -183,8 +207,8 @@ test("supports separate date and seat option buttons", () => {
   const result = detectAvailabilityFromText(
     "2026-05-08 周五 ¥488(内场A1区) 立即购票",
     [
-      { text: "2026-05-08 周五", disabled: false },
-      { text: "¥488(内场A1区)", disabled: false },
+      { text: "2026-05-08 周五", disabled: false, selected: true },
+      { text: "¥488(内场A1区)", disabled: false, selected: true },
       { text: "立即购票", disabled: false }
     ],
     { keywords: ["2026-05-08", "内场"] }
@@ -211,8 +235,7 @@ test("uses selected ticket option to disambiguate repeated price keyword", () =>
 });
 
 test("defaults to first repeated keyword option when no option is selected", () => {
-  const result = detectAvailabilityFromText(
-    "2026.4.24 ¥148(solo电竞酒店住宿票) ¥148(ReMax热麦电竞酒店住宿票) 立即购买",
+  const plan = planTargetButtonSelection(
     [
       { text: "2026.4.24", disabled: false, selected: true },
       { text: "¥148(solo电竞酒店住宿票)", disabled: false },
@@ -222,8 +245,23 @@ test("defaults to first repeated keyword option when no option is selected", () 
     { keywords: ["2026.4.24", "¥148"] }
   );
 
-  assert.equal(result.state, "available");
-  assert.equal(result.matchedText, "¥148(solo电竞酒店住宿票)");
+  assert.equal(plan?.optionSelection?.text, "¥148(solo电竞酒店住宿票)");
+});
+
+test("does not alert when another selected date has the matching ticket option", () => {
+  const result = detectAvailabilityFromText(
+    "2026.4.24 ¥148(solo电竞酒店住宿票) ¥148(ReMax热麦电竞酒店住宿票) 立即购买",
+    [
+      { text: "2026-05-04 周一", disabled: false },
+      { text: "2026-05-05 周二", disabled: false, selected: true },
+      { text: "¥488(内场B2区)", disabled: false, selected: true },
+      { text: "立即购票", disabled: false }
+    ],
+    { keywords: ["2026-05-04", "¥488", "内场"] }
+  );
+
+  assert.equal(result.state, "unknown");
+  assert.equal(result.reason, "Target date/session option is available but not selected.");
 });
 
 test("requires every non-date keyword line to match the same ticket option button", () => {
@@ -280,11 +318,25 @@ test("detects availability when keyword is only in button text, not in page text
 });
 
 test("disambiguates multiple same-price buttons by additional keyword", () => {
+  const plan = planTargetButtonSelection(
+    [
+      { text: "2026.4.25", disabled: false, selected: true },
+      { text: "\u00a588(\u5357\u4eac\u8230\u5343\u4eba\u5bb4)", disabled: false },
+      { text: "\u00a588(coser\u7279\u6548\u7968)", disabled: false },
+      { text: "\u7acb\u5373\u8d2d\u7968", disabled: false }
+    ],
+    { keywords: ["2026.4.25", "\u00a588", "\u5357\u4eac"] }
+  );
+
+  assert.equal(plan?.optionSelection?.text, "\u00a588(\u5357\u4eac\u8230\u5343\u4eba\u5bb4)");
+});
+
+test("detects availability after disambiguated ticket option is selected", () => {
   const result = detectAvailabilityFromText(
     "2026.4.25 \u00a588(\u5357\u4eac\u8230\u5343\u4eba\u5bb4) \u00a588(coser\u7279\u6548\u7968) \u7acb\u5373\u8d2d\u7968",
     [
       { text: "2026.4.25", disabled: false, selected: true },
-      { text: "\u00a588(\u5357\u4eac\u8230\u5343\u4eba\u5bb4)", disabled: false },
+      { text: "\u00a588(\u5357\u4eac\u8230\u5343\u4eba\u5bb4)", disabled: false, selected: true },
       { text: "\u00a588(coser\u7279\u6548\u7968)", disabled: false },
       { text: "\u7acb\u5373\u8d2d\u7968", disabled: false }
     ],
@@ -298,7 +350,7 @@ test("disambiguates multiple same-price buttons by additional keyword", () => {
 test("button classification runs before keyword text check", () => {
   const result = detectAvailabilityFromText("", [
     { text: "2026-05-08 \u5468\u4e94", disabled: false, selected: true },
-    { text: "\u00a5488(\u5185\u573aA1\u533a)", disabled: false },
+    { text: "\u00a5488(\u5185\u573aA1\u533a)", disabled: false, selected: true },
     { text: "\u7acb\u5373\u8d2d\u7968", disabled: false }
   ], { keywords: ["2026-05-08", "\uffe5488", "\u5185\u573a"] });
 

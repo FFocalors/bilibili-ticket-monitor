@@ -1,12 +1,12 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
-import { AVAILABLE_BUTTON_PATTERNS, FORBIDDEN_ORDER_ACTION_PATTERNS, detectAvailabilityFromText } from "./detector.js";
+import { AVAILABLE_BUTTON_PATTERNS, FORBIDDEN_ORDER_ACTION_PATTERNS, detectAvailabilityFromText, planTargetButtonSelection } from "./detector.js";
 import { startPeriodicLogCleanup } from "./log-maintenance.js";
 import { createLogger, type Logger } from "./logger.js";
 import { notifyUser, type NotificationPayload } from "./notifier.js";
 import { appendOpenClawBridgeEvent, openClawOutboxPathFromLogFile } from "./openclaw-bridge.js";
-import type { DetectionResult, MonitorConfig, NormalizedTarget } from "./types.js";
+import type { ButtonSnapshot, DetectionResult, MonitorConfig, NormalizedTarget, TicketState } from "./types.js";
 import { flattenTargets } from "./config.js";
 
 interface TargetRuntime {
@@ -21,6 +21,26 @@ interface TargetRuntime {
 interface RunMonitorOptions {
   once?: boolean;
   headless?: boolean;
+}
+
+interface PageButtonCandidate extends ButtonSnapshot {
+  index: number;
+  actionable: boolean;
+  textLength: number;
+  area: number;
+}
+
+interface PageSnapshot {
+  text: string;
+  buttons: PageButtonCandidate[];
+}
+
+interface TargetSelectionResult {
+  ready: boolean;
+  state: TicketState;
+  reason: string;
+  selectedDateText?: string;
+  selectedOptionText?: string;
 }
 
 export async function runMonitor(config: MonitorConfig, options: RunMonitorOptions = {}): Promise<void> {
@@ -109,7 +129,6 @@ async function inspectTarget(
     const page = await getTargetPage(context, runtime);
     if (!isManualHandoffUrl(page.url())) {
       await page.goto(target.url, { waitUntil: "domcontentloaded", timeout: 45000 });
-      await page.waitForLoadState("networkidle", { timeout: 2500 }).catch(() => undefined);
     }
 
     const result = await detectPageState(page, target);
@@ -120,53 +139,6 @@ async function inspectTarget(
       reason: result.reason,
       matchedText: result.matchedText
     });
-
-    if (result.state === "available") {
-      await page.bringToFront();
-      if (!runtime.availableAlerted) {
-        runtime.availableAlerted = true;
-        await logger.warn("Target availability detected; attempting order handoff", {
-          target: target.id,
-          matchedText: result.matchedText
-        });
-        await sendNotifications(config, logger, {
-          title: "检测到有票",
-          message: `${target.eventName} / ${target.name}: 已检测到目标有票，正在尝试进入订单页。`,
-          details: {
-            target: target.id,
-            url: target.url,
-            matchedText: result.matchedText,
-            stage: "detected"
-          }
-        });
-      }
-
-      const handoff = await prepareAvailableHandoff(page, target, result, config.defaults.autoEnterOrderPage);
-
-      if (handoff.enteredOrderPage || !config.defaults.autoEnterOrderPage) {
-        runtime.halted = true;
-        const handoffPage = handoff.handoffPage ?? page;
-        const screenshot = await saveScreenshot(handoffPage, config.defaults.screenshotDir, target, handoff.enteredOrderPage ? "order-entry" : "available");
-        const { handoffPage: _handoffPage, ...handoffLog } = handoff;
-        await logger.warn("Target available; manual handoff required", {
-          target: target.id,
-          ...handoffLog,
-          screenshot
-        });
-        return;
-      }
-
-      runtime.failures = 0;
-      runtime.nextAt = Date.now() + 5_000;
-      await logger.warn("Purchase entry click did not reach order page; retry scheduled", {
-        target: target.id,
-        retryInMs: runtime.nextAt - Date.now(),
-        ...formatHandoffForLog(handoff)
-      });
-      return;
-    }
-
-    runtime.availableAlerted = false;
 
     if (result.state === "blocked") {
       runtime.halted = true;
@@ -191,7 +163,118 @@ async function inspectTarget(
       return;
     }
 
-    if (result.state === "unknown") {
+    const selection = target.keywords.length > 0
+      ? await alignTargetSelection(page, target)
+      : undefined;
+    if (selection && !selection.ready) {
+      runtime.availableAlerted = false;
+      if (selection.state === "unknown") {
+        await saveUnknownSnapshot(page, config.defaults.screenshotDir, target, logger);
+      }
+      runtime.failures = 0;
+      runtime.nextAt = Date.now() + jitteredDelayMs(target.intervalSeconds, config.defaults.jitterRatio);
+      await logger.info("Target selection not confirmed; retry scheduled", {
+        target: target.id,
+        state: selection.state,
+        reason: selection.reason,
+        selectedDateText: selection.selectedDateText,
+        selectedOptionText: selection.selectedOptionText,
+        retryInMs: runtime.nextAt - Date.now()
+      });
+      return;
+    }
+
+    const readyResult = selection ? await detectPageState(page, target) : result;
+    if (selection) {
+      await logger.info("Target selection confirmed", {
+        target: target.id,
+        selectedDateText: selection.selectedDateText,
+        selectedOptionText: selection.selectedOptionText,
+        state: readyResult.state,
+        reason: readyResult.reason,
+        matchedText: readyResult.matchedText
+      });
+    }
+
+    if (readyResult.state === "available") {
+      await page.bringToFront();
+      if (!runtime.availableAlerted) {
+        runtime.availableAlerted = true;
+        await logger.warn("Target availability detected; attempting order handoff", {
+          target: target.id,
+          matchedText: readyResult.matchedText,
+          selectedDateText: selection?.selectedDateText,
+          selectedOptionText: selection?.selectedOptionText
+        });
+        await sendNotifications(config, logger, {
+          title: "检测到有票",
+          message: `${target.eventName} / ${target.name}: 已确认目标日期和票档，正在尝试进入订单页。`,
+          details: {
+            target: target.id,
+            url: target.url,
+            matchedText: readyResult.matchedText,
+            selectedDateText: selection?.selectedDateText,
+            selectedOptionText: selection?.selectedOptionText,
+            stage: "detected"
+          }
+        });
+      }
+
+      const handoff = await prepareAvailableHandoff(page, target, readyResult, config.defaults.autoEnterOrderPage);
+
+      if (handoff.enteredOrderPage || !config.defaults.autoEnterOrderPage) {
+        const handoffPage = handoff.handoffPage ?? page;
+        const orderValidation = handoff.enteredOrderPage
+          ? await validateOrderPageTarget(handoffPage, target)
+          : { valid: true };
+        if (!orderValidation.valid) {
+          runtime.halted = true;
+          const screenshot = await saveScreenshot(handoffPage, config.defaults.screenshotDir, target, "order-mismatch");
+          await sendNotifications(config, logger, {
+            title: "订单页目标不一致",
+            message: `${target.eventName} / ${target.name}: 订单页信息未通过目标关键词复核，请手动确认。`,
+            details: {
+              target: target.id,
+              url: handoffPage.url(),
+              missingKeywords: orderValidation.missingKeywords,
+              screenshot,
+              stage: "order-mismatch"
+            }
+          });
+          await logger.warn("Order page target validation failed; manual check required", {
+            target: target.id,
+            missingKeywords: orderValidation.missingKeywords,
+            screenshot
+          });
+          return;
+        }
+
+        runtime.halted = true;
+        const screenshot = await saveScreenshot(handoffPage, config.defaults.screenshotDir, target, handoff.enteredOrderPage ? "order-entry" : "available");
+        const { handoffPage: _handoffPage, ...handoffLog } = handoff;
+        await logger.warn("Target available; manual handoff required", {
+          target: target.id,
+          ...handoffLog,
+          selectedDateText: selection?.selectedDateText,
+          selectedOptionText: selection?.selectedOptionText,
+          screenshot
+        });
+        return;
+      }
+
+      runtime.failures = 0;
+      runtime.nextAt = Date.now() + 5_000;
+      await logger.warn("Purchase entry click did not reach order page; retry scheduled", {
+        target: target.id,
+        retryInMs: runtime.nextAt - Date.now(),
+        ...formatHandoffForLog(handoff)
+      });
+      return;
+    }
+
+    runtime.availableAlerted = false;
+
+    if (readyResult.state === "unknown") {
       await saveUnknownSnapshot(page, config.defaults.screenshotDir, target, logger);
     }
 
@@ -230,6 +313,134 @@ async function sendNotifications(config: MonitorConfig, logger: Logger, payload:
   }
 
   await logger.info("OpenClaw bridge mode active; WSL should poll /events");
+}
+
+async function alignTargetSelection(page: Page, target: NormalizedTarget): Promise<TargetSelectionResult> {
+  let snapshot = await collectPageSnapshot(page);
+  let plan = planTargetButtonSelection(snapshot.buttons, target);
+  if (!plan) {
+    return {
+      ready: false,
+      state: "unknown",
+      reason: "Target date/session and ticket option could not be mapped to clickable page elements."
+    };
+  }
+
+  if (plan.unavailableReason || !plan.optionSelection) {
+    return {
+      ready: false,
+      state: "sold_out",
+      reason: plan.unavailableReason ?? "Target ticket option is not currently selectable.",
+      selectedDateText: plan.dateSelections[0]?.text,
+      selectedOptionText: plan.optionSelection?.text ?? plan.unavailableText
+    };
+  }
+
+  for (const dateSelection of plan.dateSelections) {
+    if (!dateSelection.selected) {
+      await clickCandidateAtCenter(page, dateSelection);
+    }
+
+    const dateResult = await waitForTargetSelection(page, target, "date");
+    if (!dateResult.ready) {
+      return dateResult;
+    }
+    snapshot = dateResult.snapshot;
+    plan = dateResult.plan;
+  }
+
+  if (!plan.optionSelection) {
+    return {
+      ready: false,
+      state: "unknown",
+      reason: "Target date was selected, but target ticket option could not be mapped."
+    };
+  }
+
+  if (!plan.optionSelection.selected) {
+    await clickCandidateAtCenter(page, plan.optionSelection);
+  }
+
+  const optionResult = await waitForTargetSelection(page, target, "option");
+  if (!optionResult.ready) {
+    return optionResult;
+  }
+
+  const entryButton = firstAvailablePurchaseButton(optionResult.snapshot.buttons);
+  if (!entryButton) {
+    return {
+      ready: false,
+      state: "unknown",
+      reason: "Target date/session and ticket option are selected, but purchase entry is not available.",
+      selectedDateText: optionResult.plan.dateSelections[0]?.text,
+      selectedOptionText: optionResult.plan.optionSelection?.text
+    };
+  }
+
+  return {
+    ready: true,
+    state: "available",
+    reason: "Target date/session and ticket option were aligned before purchase entry.",
+    selectedDateText: optionResult.plan.dateSelections[0]?.text,
+    selectedOptionText: optionResult.plan.optionSelection?.text
+  };
+}
+
+async function waitForTargetSelection(
+  page: Page,
+  target: NormalizedTarget,
+  kind: "date" | "option"
+): Promise<TargetSelectionResult & { snapshot: PageSnapshot; plan: NonNullable<ReturnType<typeof planTargetButtonSelection<PageButtonCandidate>>> }> {
+  const deadline = Date.now() + 2500;
+  let lastSnapshot = await collectPageSnapshot(page);
+  let lastPlan = planTargetButtonSelection(lastSnapshot.buttons, target);
+
+  while (Date.now() < deadline) {
+    lastSnapshot = await collectPageSnapshot(page);
+    lastPlan = planTargetButtonSelection(lastSnapshot.buttons, target);
+
+    if (lastPlan?.unavailableReason) {
+      return {
+        ready: false,
+        state: "sold_out",
+        reason: lastPlan.unavailableReason,
+        selectedDateText: lastPlan.dateSelections[0]?.text,
+        selectedOptionText: lastPlan.optionSelection?.text ?? lastPlan.unavailableText,
+        snapshot: lastSnapshot,
+        plan: lastPlan
+      };
+    }
+
+    if (lastPlan?.optionSelection) {
+      const datesSelected = lastPlan.dateSelections.every((selection) => selection.selected);
+      const optionSelected = Boolean(lastPlan.optionSelection.selected);
+      if ((kind === "date" && datesSelected) || (kind === "option" && datesSelected && optionSelected)) {
+        return {
+          ready: true,
+          state: "available",
+          reason: "Target selection confirmed.",
+          selectedDateText: lastPlan.dateSelections[0]?.text,
+          selectedOptionText: lastPlan.optionSelection.text,
+          snapshot: lastSnapshot,
+          plan: lastPlan
+        };
+      }
+    }
+
+    await page.waitForTimeout(80);
+  }
+
+  return {
+    ready: false,
+    state: "unknown",
+    reason: kind === "date"
+      ? "Target date/session did not become selected after clicking."
+      : "Target ticket option did not become selected after clicking.",
+    selectedDateText: lastPlan?.dateSelections[0]?.text,
+    selectedOptionText: lastPlan?.optionSelection?.text ?? lastPlan?.unavailableText,
+    snapshot: lastSnapshot,
+    plan: lastPlan ?? { dateSelections: [] }
+  };
 }
 
 async function prepareAvailableHandoff(
@@ -320,13 +531,19 @@ async function clickActionAtCenter(page: Page, locator: Locator): Promise<void> 
 }
 
 async function detectPageState(page: Page, target: NormalizedTarget): Promise<DetectionResult> {
-  const visibleText = await page.locator("body").innerText({ timeout: 10000 }).catch(() => "");
-  const buttons = await page.locator(detectionElementSelector()).evaluateAll((elements) =>
-    elements
-      .map((element) => {
+  const snapshot = await collectPageSnapshot(page);
+  return detectAvailabilityFromText(snapshot.text, snapshot.buttons, target);
+}
+
+async function collectPageSnapshot(page: Page): Promise<PageSnapshot> {
+  const snapshot = await page.locator(detectionElementSelector()).evaluateAll((elements) => {
+    const bodyText = (document.body?.innerText ?? "").replace(/\s+/g, " ").trim();
+    const buttons = elements
+      .map((element, index) => {
         const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
         const style = window.getComputedStyle(element);
         const rect = element.getBoundingClientRect();
+        const tagName = element.tagName.toLowerCase();
         const className = element.className.toString().toLowerCase();
         const disabled =
           element.hasAttribute("disabled") ||
@@ -343,9 +560,18 @@ async function detectPageState(page: Page, target: NormalizedTarget): Promise<De
           className.includes("current") ||
           className.includes("choose") ||
           className.includes("picked");
+        const actionable =
+          tagName === "button" ||
+          tagName === "a" ||
+          element.getAttribute("role") === "button" ||
+          element.hasAttribute("onclick") ||
+          element.tabIndex >= 0 ||
+          style.cursor === "pointer" ||
+          /btn|button|ticket|price|sku|option|session|date|item|tag/i.test(className);
         const visible =
           style.visibility !== "hidden" &&
           style.display !== "none" &&
+          text.length > 0 &&
           text.length <= 180 &&
           rect.width > 8 &&
           rect.height > 8 &&
@@ -355,12 +581,74 @@ async function detectPageState(page: Page, target: NormalizedTarget): Promise<De
           /\d{4}[./-]\d{1,2}[./-]\d{1,2}/.test(text) ||
           /[¥￥]\s*\d+/.test(text) ||
           /立即购|购买|购票|支付|订单|售罄|不可售|开售/.test(text);
-        return visible && relevantText ? { text, disabled, selected } : undefined;
+        return visible && relevantText
+          ? {
+              index,
+              text,
+              disabled,
+              selected,
+              actionable,
+              textLength: text.length,
+              area: rect.width * rect.height
+            }
+          : undefined;
       })
-      .filter((button): button is { text: string; disabled: boolean; selected: boolean } => Boolean(button && button.text.length > 0))
-  );
+      .filter((button) => Boolean(button && button.text.length > 0));
 
-  return detectAvailabilityFromText(visibleText, buttons, target);
+    return { text: bodyText, buttons };
+  }).catch(() => ({ text: "", buttons: [] }));
+  const typedSnapshot = snapshot as PageSnapshot;
+  typedSnapshot.buttons.sort((a, b) =>
+    Number(b.selected) - Number(a.selected) ||
+    Number(b.actionable) - Number(a.actionable) ||
+    a.textLength - b.textLength ||
+    a.area - b.area ||
+    a.index - b.index
+  );
+  return typedSnapshot;
+}
+
+async function clickCandidateAtCenter(page: Page, candidate: PageButtonCandidate): Promise<void> {
+  await clickActionAtCenter(page, page.locator(detectionElementSelector()).nth(candidate.index));
+}
+
+function firstAvailablePurchaseButton(buttons: ButtonSnapshot[]): ButtonSnapshot | undefined {
+  return buttons.find((button) =>
+    !button.disabled &&
+    AVAILABLE_BUTTON_PATTERNS.some((pattern) => pattern.test(button.text))
+  );
+}
+
+async function validateOrderPageTarget(page: Page, target: NormalizedTarget): Promise<{ valid: boolean; missingKeywords?: string[] }> {
+  if (target.keywords.length === 0) {
+    return { valid: true };
+  }
+
+  const text = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+  const normalizedText = normalizeForTargetValidation(text);
+  const compactText = normalizedText.replace(/\s+/g, "");
+  const missingKeywords = target.keywords
+    .map((keyword) => keyword.trim())
+    .filter(Boolean)
+    .filter((keyword) => {
+      const normalizedKeyword = normalizeForTargetValidation(keyword);
+      return !normalizedText.includes(normalizedKeyword) && !compactText.includes(normalizedKeyword.replace(/\s+/g, ""));
+    });
+
+  return missingKeywords.length === 0
+    ? { valid: true }
+    : { valid: false, missingKeywords };
+}
+
+function normalizeForTargetValidation(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(/[￥]/g, "¥")
+    .replace(/\b(\d{4})[./-](\d{1,2})[./-](\d{1,2})\b/g, (_match, year: string, month: string, day: string) =>
+      `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`
+    )
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 async function hoverManualHandoffButton(

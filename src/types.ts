@@ -69,6 +69,10 @@ export interface ButtonSnapshot {
   text: string;
   disabled: boolean;
   selected?: boolean;
+  index?: number;
+  actionable?: boolean;
+  textLength?: number;
+  area?: number;
 }
 
 export interface DetectionResult {
