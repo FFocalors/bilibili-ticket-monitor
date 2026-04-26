@@ -8,6 +8,12 @@ defaults:
   userDataDir: .browser-profile
   logFile: logs/monitor.log
   screenshotDir: logs/screenshots
+  logCleanupEnabled: true
+  logCleanupIntervalMinutes: 30
+  screenshotRetentionHours: 12
+  maxScreenshotFiles: 300
+  maxLogFileBytes: 5242880
+  maxOpenClawEventBytes: 2097152
 
 notifications:
   openclaw:

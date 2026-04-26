@@ -49,6 +49,30 @@ events:
   assert.equal(config.notifications.openclaw.mode, "next-heartbeat");
 });
 
+test("parseConfig applies log cleanup defaults and custom values", () => {
+  const config = parseConfig(`
+defaults:
+  logCleanupEnabled: true
+  logCleanupIntervalMinutes: 15
+  screenshotRetentionHours: 6
+  maxScreenshotFiles: 120
+  maxLogFileBytes: 1048576
+  maxOpenClawEventBytes: 524288
+events:
+  - name: show-a
+    url: https://show.bilibili.com/
+    targets:
+      - keywords: ["2026-05-08"]
+`);
+
+  assert.equal(config.defaults.logCleanupEnabled, true);
+  assert.equal(config.defaults.logCleanupIntervalMinutes, 15);
+  assert.equal(config.defaults.screenshotRetentionHours, 6);
+  assert.equal(config.defaults.maxScreenshotFiles, 120);
+  assert.equal(config.defaults.maxLogFileBytes, 1048576);
+  assert.equal(config.defaults.maxOpenClawEventBytes, 524288);
+});
+
 test("parseConfig rejects targets without identifying keywords", () => {
   assert.throws(
     () => parseConfig(`

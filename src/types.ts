@@ -29,6 +29,12 @@ export interface MonitorDefaults {
   userDataDir: string;
   logFile: string;
   screenshotDir: string;
+  logCleanupEnabled: boolean;
+  logCleanupIntervalMinutes: number;
+  screenshotRetentionHours: number;
+  maxScreenshotFiles: number;
+  maxLogFileBytes: number;
+  maxOpenClawEventBytes: number;
 }
 
 export interface OpenClawNotificationConfig {

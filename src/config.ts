@@ -20,7 +20,13 @@ const DEFAULTS: MonitorDefaults = {
   autoEnterOrderPage: true,
   userDataDir: ".browser-profile",
   logFile: "logs/monitor.log",
-  screenshotDir: "logs/screenshots"
+  screenshotDir: "logs/screenshots",
+  logCleanupEnabled: true,
+  logCleanupIntervalMinutes: 30,
+  screenshotRetentionHours: 12,
+  maxScreenshotFiles: 300,
+  maxLogFileBytes: 5 * 1024 * 1024,
+  maxOpenClawEventBytes: 2 * 1024 * 1024
 };
 
 const DEFAULT_NOTIFICATIONS: NotificationConfig = {
@@ -107,7 +113,13 @@ function normalizeDefaults(raw: Partial<MonitorDefaults>, baseDir: string): Moni
     autoEnterOrderPage: Boolean(raw.autoEnterOrderPage ?? DEFAULTS.autoEnterOrderPage),
     userDataDir: resolveConfigPath(raw.userDataDir ?? DEFAULTS.userDataDir, baseDir),
     logFile: resolveConfigPath(raw.logFile ?? DEFAULTS.logFile, baseDir),
-    screenshotDir: resolveConfigPath(raw.screenshotDir ?? DEFAULTS.screenshotDir, baseDir)
+    screenshotDir: resolveConfigPath(raw.screenshotDir ?? DEFAULTS.screenshotDir, baseDir),
+    logCleanupEnabled: Boolean(raw.logCleanupEnabled ?? DEFAULTS.logCleanupEnabled),
+    logCleanupIntervalMinutes: positiveInteger(raw.logCleanupIntervalMinutes ?? DEFAULTS.logCleanupIntervalMinutes, "defaults.logCleanupIntervalMinutes"),
+    screenshotRetentionHours: positiveInteger(raw.screenshotRetentionHours ?? DEFAULTS.screenshotRetentionHours, "defaults.screenshotRetentionHours"),
+    maxScreenshotFiles: positiveInteger(raw.maxScreenshotFiles ?? DEFAULTS.maxScreenshotFiles, "defaults.maxScreenshotFiles"),
+    maxLogFileBytes: positiveInteger(raw.maxLogFileBytes ?? DEFAULTS.maxLogFileBytes, "defaults.maxLogFileBytes"),
+    maxOpenClawEventBytes: positiveInteger(raw.maxOpenClawEventBytes ?? DEFAULTS.maxOpenClawEventBytes, "defaults.maxOpenClawEventBytes")
   };
 }
 

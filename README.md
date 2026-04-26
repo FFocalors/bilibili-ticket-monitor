@@ -103,6 +103,18 @@ defaults:
   userDataDir: .browser-profile
   logFile: logs/monitor.log
   screenshotDir: logs/screenshots
+  # 启用定期日志清理，避免 screenshots 和 outbox 无限膨胀。
+  logCleanupEnabled: true
+  # 清理任务执行间隔，单位分钟。
+  logCleanupIntervalMinutes: 30
+  # screenshots 中文件的保留时长，超时会删除。
+  screenshotRetentionHours: 12
+  # screenshots 最大保留文件数，超出后按最旧优先删除。
+  maxScreenshotFiles: 300
+  # monitor.log 最大体积，超出后只保留最新内容。
+  maxLogFileBytes: 5242880
+  # openclaw-events.jsonl 最大体积，超出后只保留最新内容。
+  maxOpenClawEventBytes: 2097152
 
 notifications:
   openclaw:
@@ -139,6 +151,12 @@ events:
 - `defaults.browserChannel`：浏览器通道，Windows 推荐 `msedge`。
 - `defaults.autoEnterOrderPage`：检测到可购买入口后是否进入订单信息页；即使设为 `true`，脚本也不会点击支付/提交类按钮。
 - `defaults.userDataDir`：Playwright 持久化 profile 目录，用于保存登录态。不要提交或分享。
+- `defaults.logCleanupEnabled`：是否启用定期日志清理。
+- `defaults.logCleanupIntervalMinutes`：清理任务执行间隔，单位分钟。
+- `defaults.screenshotRetentionHours`：截图保留时长，超时文件会删除。
+- `defaults.maxScreenshotFiles`：截图目录最大保留文件数，超出后删除最旧文件。
+- `defaults.maxLogFileBytes`：`monitor.log` 最大体积，超出后只保留最新日志行。
+- `defaults.maxOpenClawEventBytes`：`logs/openclaw-events.jsonl` 最大体积，超出后只保留最新事件行。
 - `events[].url`：会员购活动详情页 URL。
 - `events[].targets[]`：要监控的目标票档。每个 target 可以配置 `keywords`，也可以使用 `date`、`session`、`price`，最终都会合并为关键词。
 - `targets[].name`：只用于日志、通知和界面显示，不参与页面匹配。如果“内场”“看台 A 区”等票档名称需要参与判断，请也写进 `keywords`。
@@ -221,6 +239,17 @@ curl -sS "http://${WINDOWS_HOST}:4174/events?since=0"
 ```
 
 如果仍然不通，通常需要确认 GUI/桥接服务已启动、`4174` 正在监听 `0.0.0.0`，以及 Windows 防火墙已放行 TCP 4174。
+
+## 日志清理
+
+如果你长时间开着监控，真正占空间的通常不是 `monitor.log`，而是 `logs/screenshots/` 里的截图。现在脚本会按配置定期清理：
+
+- 删除超过 `screenshotRetentionHours` 的旧截图
+- 当截图数量超过 `maxScreenshotFiles` 时，继续删除最旧截图
+- 当 `monitor.log` 超过 `maxLogFileBytes` 时，只保留最新日志行
+- 当 `logs/openclaw-events.jsonl` 超过 `maxOpenClawEventBytes` 时，只保留最新事件行
+
+默认是开启的。如果你需要保留更长的排查材料，可以把保留时长或文件数调大；如果你需要完全停用自动清理，可以把 `logCleanupEnabled` 设为 `false`。
 
 ## 开源隐私说明
 

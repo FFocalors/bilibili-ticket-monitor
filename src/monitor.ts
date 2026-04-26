@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
 import { AVAILABLE_BUTTON_PATTERNS, FORBIDDEN_ORDER_ACTION_PATTERNS, detectAvailabilityFromText } from "./detector.js";
+import { startPeriodicLogCleanup } from "./log-maintenance.js";
 import { createLogger, type Logger } from "./logger.js";
 import { notifyUser, type NotificationPayload } from "./notifier.js";
 import { appendOpenClawBridgeEvent, openClawOutboxPathFromLogFile } from "./openclaw-bridge.js";
@@ -31,11 +32,24 @@ export async function runMonitor(config: MonitorConfig, options: RunMonitorOptio
   }
 
   await mkdir(config.defaults.screenshotDir, { recursive: true });
+  const stopLogCleanup = startPeriodicLogCleanup({
+    enabled: config.defaults.logCleanupEnabled,
+    intervalMinutes: config.defaults.logCleanupIntervalMinutes,
+    logFile: config.defaults.logFile,
+    screenshotDir: config.defaults.screenshotDir,
+    openClawOutboxFile: openClawOutboxPathFromLogFile(config.defaults.logFile),
+    screenshotRetentionHours: config.defaults.screenshotRetentionHours,
+    maxScreenshotFiles: config.defaults.maxScreenshotFiles,
+    maxLogFileBytes: config.defaults.maxLogFileBytes,
+    maxOpenClawEventBytes: config.defaults.maxOpenClawEventBytes
+  }, logger);
   await logger.info("Starting monitor", {
     targets: targets.length,
     browserChannel: config.defaults.browserChannel,
     autoEnterOrderPage: config.defaults.autoEnterOrderPage,
-    userDataDir: config.defaults.userDataDir
+    userDataDir: config.defaults.userDataDir,
+    logCleanupEnabled: config.defaults.logCleanupEnabled,
+    logCleanupIntervalMinutes: config.defaults.logCleanupIntervalMinutes
   });
 
   const context = await chromium.launchPersistentContext(config.defaults.userDataDir, {
@@ -77,6 +91,7 @@ export async function runMonitor(config: MonitorConfig, options: RunMonitorOptio
   } finally {
     process.off("SIGINT", shutdown);
     process.off("SIGTERM", shutdown);
+    stopLogCleanup();
     await context.close();
     await logger.info("Monitor stopped");
   }

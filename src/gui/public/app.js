@@ -198,7 +198,13 @@ function readConfigFromForm() {
     autoEnterOrderPage: elements.autoEnterInput.checked,
     userDataDir: state.config.defaults.userDataDir ?? ".browser-profile",
     logFile: state.config.defaults.logFile ?? "logs/monitor.log",
-    screenshotDir: state.config.defaults.screenshotDir ?? "logs/screenshots"
+    screenshotDir: state.config.defaults.screenshotDir ?? "logs/screenshots",
+    logCleanupEnabled: state.config.defaults.logCleanupEnabled ?? true,
+    logCleanupIntervalMinutes: state.config.defaults.logCleanupIntervalMinutes ?? 30,
+    screenshotRetentionHours: state.config.defaults.screenshotRetentionHours ?? 12,
+    maxScreenshotFiles: state.config.defaults.maxScreenshotFiles ?? 300,
+    maxLogFileBytes: state.config.defaults.maxLogFileBytes ?? 5 * 1024 * 1024,
+    maxOpenClawEventBytes: state.config.defaults.maxOpenClawEventBytes ?? 2 * 1024 * 1024
   };
 
   const events = [...elements.events.querySelectorAll(".event-panel")].map((panel) => ({
@@ -419,6 +425,12 @@ function normalizeConfig(config) {
       userDataDir: ".browser-profile",
       logFile: "logs/monitor.log",
       screenshotDir: "logs/screenshots",
+      logCleanupEnabled: true,
+      logCleanupIntervalMinutes: 30,
+      screenshotRetentionHours: 12,
+      maxScreenshotFiles: 300,
+      maxLogFileBytes: 5 * 1024 * 1024,
+      maxOpenClawEventBytes: 2 * 1024 * 1024,
       ...(config.defaults ?? {})
     },
     notifications: {
